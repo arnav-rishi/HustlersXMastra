@@ -1,0 +1,133 @@
+version: "3.9"
+
+# LexGuard AI — Local Development Stack
+# Run: docker-compose up -d
+
+services:
+  # ─────────────────────────────────────────
+  # Qdrant Vector Database
+  # ─────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.10.0
+    container_name: lexguard-qdrant
+    ports:
+      - "6333:6333"   # HTTP REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-local-dev-key}
+      QDRANT__LOG_LEVEL: INFO
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # PostgreSQL — Audit Logs, Metadata, Org Config
+  # ─────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: lexguard-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: lexguard
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: lexguard_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lexguard -d lexguard_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # Redis — Circuit Breaker Cache, Rate Limiting, Session
+  # ─────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: lexguard-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # OpenTelemetry Collector
+  # ─────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.101.0
+    container_name: lexguard-otel
+    ports:
+      - "4317:4317"   # gRPC receiver
+      - "4318:4318"   # HTTP receiver
+      - "8888:8888"   # Prometheus metrics
+    volumes:
+      - ./infra/otel/collector-config.yml:/etc/otel/config.yaml
+    command: ["--config=/etc/otel/config.yaml"]
+    depends_on:
+      - jaeger
+      - prometheus
+
+  # ─────────────────────────────────────────
+  # Jaeger — Distributed Tracing UI
+  # ─────────────────────────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: lexguard-jaeger
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "14250:14250"   # gRPC collector
+      - "14268:14268"   # HTTP collector
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+
+  # ─────────────────────────────────────────
+  # Prometheus — Metrics Scraping
+  # ─────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: lexguard-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+
+  # ─────────────────────────────────────────
+  # Grafana — Dashboard
+  # ─────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: lexguard-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./infra/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+
+volumes:
+  qdrant_data:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+    name: lexguard-network

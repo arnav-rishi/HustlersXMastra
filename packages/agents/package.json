@@ -1,0 +1,37 @@
+{
+  "name": "@lexguard/agents",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./src/index.ts",
+  "exports": {
+    "./document-agent": "./src/document-agent.ts",
+    "./parsing-agent": "./src/parsing-agent.ts",
+    "./embedding-agent": "./src/embedding-agent.ts",
+    "./classification-agent": "./src/classification-agent.ts",
+    "./retrieval-agent": "./src/retrieval-agent.ts",
+    "./risk-agent": "./src/risk-agent.ts",
+    "./benchmark-agent": "./src/benchmark-agent.ts",
+    "./rewrite-agent": "./src/rewrite-agent.ts",
+    "./compliance-agent": "./src/compliance-agent.ts",
+    "./evaluation-agent": "./src/evaluation-agent.ts",
+    "./memory-agent": "./src/memory-agent.ts",
+    "./qa-agent": "./src/qa-agent.ts",
+    "./reporting-agent": "./src/reporting-agent.ts"
+  },
+  "scripts": {
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mastra/core": "^0.10.0",
+    "openai": "^4.52.0",
+    "uuid": "^10.0.0",
+    "@lexguard/shared": "workspace:*",
+    "@lexguard/observability": "workspace:*",
+    "@lexguard/qdrant": "workspace:*",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.4.5"
+  }
+}

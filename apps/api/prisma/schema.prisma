@@ -1,0 +1,250 @@
+// This is your Prisma schema file for LexGuard AI
+// PRD v2.0 Section 10 (Tech Stack) — PostgreSQL 16 via Prisma ORM
+// ACID compliance; audit log; org config
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Organization / Tenant ────────────────────────────────────────────────────
+
+model Organization {
+  id               String   @id @default(uuid()) @db.Uuid
+  name             String   @db.VarChar(255)
+  // PII: field-level encrypted at rest with AES-256 + KMS
+  email            String   @unique @db.VarChar(255)
+  plan             Plan     @default(STARTER)
+  awsRegion        String   @default("us-east-1") @map("aws_region")
+  citationLimit    Int      @default(1000) @map("citation_limit")
+  rateLimitRpm     Int      @default(100) @map("rate_limit_rpm")
+  consentTimestamp DateTime @map("consent_timestamp")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  users     User[]
+  contracts Contract[]
+  auditLogs AuditLog[]
+  hitlQueue HitlQueueItem[]
+  deletions DeletionRequest[]
+
+  @@map("organizations")
+}
+
+enum Plan {
+  STARTER
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+// ─── User ─────────────────────────────────────────────────────────────────────
+
+model User {
+  id             String       @id @default(uuid()) @db.Uuid
+  orgId          String       @map("org_id") @db.Uuid
+  // PII: field-level encrypted
+  email          String       @unique @db.VarChar(255)
+  displayName    String       @map("display_name") @db.VarChar(255)
+  roles          UserRole[]
+  createdAt      DateTime     @default(now()) @map("created_at")
+  lastLoginAt    DateTime?    @map("last_login_at")
+
+  // Relations
+  organization   Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  uploads        Contract[]   @relation("Uploader")
+  hitlDecisions  HitlQueueItem[] @relation("Reviewer")
+
+  @@index([orgId])
+  @@map("users")
+}
+
+enum UserRole {
+  GENERAL_COUNSEL
+  LEGAL_OPERATIONS
+  LEGAL_ANALYST
+  COMPLIANCE_OFFICER
+  PROCUREMENT
+  SALES
+  ADMIN
+}
+
+// ─── Contract ─────────────────────────────────────────────────────────────────
+
+model Contract {
+  id           String           @id @default(uuid()) @db.Uuid
+  orgId        String           @map("org_id") @db.Uuid
+  uploadedBy   String           @map("uploaded_by") @db.Uuid
+  fileName     String           @map("file_name") @db.VarChar(500)
+  fileSize     BigInt           @map("file_size")
+  mimeType     String           @map("mime_type") @db.VarChar(100)
+  documentType DocumentType     @map("document_type")
+  s3Key        String           @map("s3_key") @db.VarChar(1000)
+  jurisdiction String?          @db.VarChar(50)
+  status       ContractStatus   @default(QUEUED)
+  workflowId   String?          @map("workflow_id") @db.Uuid
+  pageCount    Int?             @map("page_count")
+  // PII: encrypted before storage
+  partyNames   String[]         @map("party_names")
+  contractDate DateTime?        @map("contract_date")
+  contractTitle String?         @map("contract_title") @db.VarChar(500)
+  overallRisk  RiskLevel?       @map("overall_risk")
+  reportId     String?          @map("report_id") @db.Uuid
+  createdAt    DateTime         @default(now()) @map("created_at")
+  completedAt  DateTime?        @map("completed_at")
+
+  // Relations
+  organization Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  uploader     User          @relation("Uploader", fields: [uploadedBy], references: [id])
+  auditLogs    AuditLog[]
+  hitlItems    HitlQueueItem[]
+
+  @@index([orgId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("contracts")
+}
+
+enum DocumentType {
+  DIGITAL_PDF
+  SCANNED_PDF
+  DOCX
+}
+
+enum ContractStatus {
+  QUEUED
+  PROCESSING
+  HITL_REQUIRED
+  COMPLETED
+  FAILED
+}
+
+enum RiskLevel {
+  CRITICAL
+  MODERATE
+  LOW
+}
+
+// ─── Audit Log ────────────────────────────────────────────────────────────────
+// Immutable. 7-year retention. Per PRD LG-COMP-002.
+
+model AuditLog {
+  id              String   @id @default(uuid()) @db.Uuid
+  traceId         String   @map("trace_id") @db.VarChar(64)
+  spanId          String   @map("span_id") @db.VarChar(32)
+  orgId           String   @map("org_id") @db.Uuid
+  contractId      String?  @map("contract_id") @db.Uuid
+  agentId         String   @map("agent_id") @db.VarChar(100)
+  eventType       String   @map("event_type") @db.VarChar(100)
+  // SHA-256 of the full prompt sent to the LLM
+  promptHash      String?  @map("prompt_hash") @db.VarChar(64)
+  modelVersion    String?  @map("model_version") @db.VarChar(50)
+  inputTokens     Int?     @map("input_tokens")
+  outputTokens    Int?     @map("output_tokens")
+  latencyMs       Int?     @map("latency_ms")
+  enkryptPass     Boolean? @map("enkrypt_pass")
+  confidenceScore Float?   @map("confidence_score")
+  hitlTriggered   Boolean  @default(false) @map("hitl_triggered")
+  payload         Json?    // Additional context (no PII)
+  timestamp       DateTime @default(now())
+
+  // Relations
+  organization Organization @relation(fields: [orgId], references: [id])
+  contract     Contract?    @relation(fields: [contractId], references: [id])
+
+  @@index([orgId])
+  @@index([traceId])
+  @@index([contractId])
+  @@index([timestamp])
+  @@map("audit_logs")
+}
+
+// ─── HITL Queue ───────────────────────────────────────────────────────────────
+
+model HitlQueueItem {
+  id              String         @id @default(uuid()) @db.Uuid
+  orgId           String         @map("org_id") @db.Uuid
+  contractId      String         @map("contract_id") @db.Uuid
+  clauseIndex     Int            @map("clause_index")
+  reason          HitlReason
+  originalClause  String         @map("original_clause") @db.Text
+  aiSuggestion    String?        @map("ai_suggestion") @db.Text
+  riskReason      String?        @map("risk_reason") @db.Text
+  enkryptFlags    String[]       @map("enkrypt_flags")
+  confidenceScore Float?         @map("confidence_score")
+  status          HitlStatus     @default(PENDING)
+  reviewerId      String?        @map("reviewer_id") @db.Uuid
+  decision        HitlDecision?
+  editedText      String?        @map("edited_text") @db.Text
+  reviewerNotes   String?        @map("reviewer_notes") @db.Text
+  createdAt       DateTime       @default(now()) @map("created_at")
+  slaDeadline     DateTime       @map("sla_deadline")
+  decidedAt       DateTime?      @map("decided_at")
+
+  // Relations
+  organization Organization @relation(fields: [orgId], references: [id])
+  contract     Contract     @relation(fields: [contractId], references: [id])
+  reviewer     User?        @relation("Reviewer", fields: [reviewerId], references: [id])
+
+  @@index([orgId])
+  @@index([status])
+  @@index([contractId])
+  @@map("hitl_queue")
+}
+
+enum HitlReason {
+  ENKRYPT_CONFIDENCE_LOW
+  OCR_CONFIDENCE_LOW
+  HALLUCINATED_CITATION
+  TOXICITY_DETECTED
+  PROMPT_INJECTION
+  CONFLICTING_CLAUSES
+  JURISDICTION_UNVERIFIED
+}
+
+enum HitlStatus {
+  PENDING
+  IN_REVIEW
+  DECIDED
+}
+
+enum HitlDecision {
+  APPROVE
+  REJECT
+  EDIT
+}
+
+// ─── GDPR Deletion Requests ───────────────────────────────────────────────────
+
+model DeletionRequest {
+  id               String          @id @default(uuid()) @db.Uuid
+  orgId            String          @map("org_id") @db.Uuid
+  requestedBy      String          @map("requested_by") @db.Uuid
+  status           DeletionStatus  @default(INITIATED)
+  // Confirmation of what was deleted (retained 7 years for compliance)
+  s3ObjectsDeleted Int             @default(0) @map("s3_objects_deleted")
+  pgRowsDeleted    Int             @default(0) @map("pg_rows_deleted")
+  qdrantPointsDeleted Int          @default(0) @map("qdrant_points_deleted")
+  initiatedAt      DateTime        @default(now()) @map("initiated_at")
+  completedAt      DateTime?       @map("completed_at")
+  errorMessage     String?         @map("error_message")
+
+  // Relations
+  organization Organization @relation(fields: [orgId], references: [id])
+
+  @@index([orgId])
+  @@index([status])
+  @@map("deletion_requests")
+}
+
+enum DeletionStatus {
+  INITIATED
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  PARTIAL
+}
