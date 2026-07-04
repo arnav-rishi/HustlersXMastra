@@ -1,0 +1,20 @@
+{
+  "name": "@lexguard/enkrypt",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./src/pipeline.ts",
+  "exports": {
+    "./pipeline": "./src/pipeline.ts"
+  },
+  "scripts": {
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@lexguard/shared": "workspace:*",
+    "@lexguard/observability": "workspace:*",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "name": "lexguard-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LexGuard AI — Enterprise Legal Intelligence Platform",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "dev:api": "pnpm --filter @lexguard/api dev",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "type-check": "turbo run type-check",
+    "qdrant:init": "dotenv -e .env.local -- tsx packages/qdrant/src/init.ts",
+    "db:migrate": "pnpm --filter @lexguard/api db:migrate",
+    "db:generate": "pnpm --filter @lexguard/api db:generate",
+    "db:studio": "pnpm --filter @lexguard/api db:studio",
+    "db:seed": "pnpm --filter @lexguard/api db:seed",
+    "infra:up": "docker-compose up -d",
+    "infra:down": "docker-compose down",
+    "infra:reset": "docker-compose down -v",
+    "infra:logs": "docker-compose logs -f",
+    "setup": "pnpm install && pnpm db:generate && pnpm infra:up",
+    "clean": "turbo run clean && rimraf node_modules **/node_modules"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "turbo": "^2.0.0",
+    "typescript": "^5.4.5",
+    "tsx": "^4.15.0",
+    "dotenv-cli": "^7.4.2",
+    "prettier": "^3.3.0",
+    "eslint": "^8.57.0",
+    "rimraf": "^5.0.7"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}
+
