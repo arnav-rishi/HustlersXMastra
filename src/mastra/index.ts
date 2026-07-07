@@ -12,7 +12,8 @@
  *   QDRANT_API_KEY      — Qdrant Cloud API key
  */
 
-import { Mastra, Agent } from "@mastra/core";
+import { Mastra } from "@mastra/core";
+import { Agent } from "@mastra/core/agent";
 import { openai } from "@ai-sdk/openai";
 
 // ─── Models ──────────────────────────────────────────────────────────────────

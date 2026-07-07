@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@ai-sdk/openai':
+        specifier: ^1.1.9
+        version: 1.3.24(zod@4.4.3)
       '@mastra/core':
         specifier: ^1.50.0
         version: 1.50.0(@grpc/grpc-js@1.14.4)(express@5.2.1)(zod@4.4.3)
@@ -312,6 +315,12 @@ packages:
         optional: true
       express:
         optional: true
+
+  '@ai-sdk/openai@1.3.24':
+    resolution: {integrity: sha512-GYXnGJTHRTZc4gJMSmFRgEQudjqd4PUN0ZjQhPwOAYH1yOAvQoG/Ikqs+HyISRbLPCrhbZnPKCNHuRU4OfpW0Q==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      zod: ^3.0.0
 
   '@ai-sdk/provider-utils@2.2.8':
     resolution: {integrity: sha512-fqhG+4sCVv8x7nFzYnFo19ryhAa3w096Kmc3hWxMQfW/TubPOmt3A6tYZhl4mUfQWWQMsuSkLrtjlWuXBVSGQA==}
@@ -4841,6 +4850,12 @@ snapshots:
     optionalDependencies:
       '@grpc/grpc-js': 1.14.4
       express: 5.2.1
+
+  '@ai-sdk/openai@1.3.24(zod@4.4.3)':
+    dependencies:
+      '@ai-sdk/provider': 1.1.3
+      '@ai-sdk/provider-utils': 2.2.8(zod@4.4.3)
+      zod: 4.4.3
 
   '@ai-sdk/provider-utils@2.2.8(zod@3.25.76)':
     dependencies:
