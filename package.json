@@ -24,6 +24,8 @@
     "clean": "turbo run clean && rimraf node_modules **/node_modules"
   },
   "devDependencies": {
+    "@mastra/core": "^0.10.0",
+    "mastra": "^0.10.0",
     "@types/node": "^20.14.0",
     "turbo": "^2.0.0",
     "typescript": "^5.4.5",
