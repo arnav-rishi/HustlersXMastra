@@ -8,8 +8,7 @@
     "dev": "turbo run dev",
     "dev:api": "pnpm --filter @lexguard/api dev",
     "dev:web": "pnpm --filter @lexguard/web dev",
-    "dev:ui": "dotenv -e .env.local -- node_modules/.bin/mastra dev",
-    "dev:ui:patch": "node scripts/patch-mastra.mjs",
+    "dev:ui": "dotenv -e .env.local -- node scripts/start-mastra-studio.mjs",
     "lint": "turbo run lint",
     "test": "turbo run test",
     "type-check": "turbo run type-check",
@@ -28,6 +27,7 @@
   "devDependencies": {
     "@mastra/core": "^0.10.0",
     "mastra": "^0.10.0",
+    "zod": "^4.0.0",
     "@types/node": "^20.14.0",
     "turbo": "^2.0.0",
     "typescript": "^5.4.5",
