@@ -2,9 +2,4 @@ packages:
   - "apps/*"
   - "packages/*"
 
-allowBuilds:
-  - "@prisma/client"
-  - "@prisma/engines"
-  - "esbuild"
-  - "prisma"
-  - "protobufjs"
+dangerouslyAllowAllBuilds: true
