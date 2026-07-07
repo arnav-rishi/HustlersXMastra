@@ -32,7 +32,7 @@ const proc = spawn(bin, ["dev"], {
   env,
   stdio: "inherit",
   cwd: projectRoot,
-  shell: false,
+  shell: true,
 });
 
 proc.on("error", (err) => {
