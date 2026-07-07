@@ -9,6 +9,7 @@
     "dev:api": "pnpm --filter @lexguard/api dev",
     "dev:web": "pnpm --filter @lexguard/web dev",
     "dev:ui": "dotenv -e .env.local -- node_modules/.bin/mastra dev",
+    "dev:ui:patch": "node scripts/patch-mastra.mjs",
     "lint": "turbo run lint",
     "test": "turbo run test",
     "type-check": "turbo run type-check",
