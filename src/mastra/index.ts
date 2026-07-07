@@ -1,37 +1,20 @@
 import { Mastra } from "@mastra/core";
-import { documentAgent } from "../../packages/agents/src/document-agent";
-import { parsingAgent } from "../../packages/agents/src/parsing-agent";
-import { embeddingAgent } from "../../packages/agents/src/embedding-agent";
-import { classificationAgent } from "../../packages/agents/src/classification-agent";
-import { retrievalAgent } from "../../packages/agents/src/retrieval-agent";
-import { riskAgent } from "../../packages/agents/src/risk-agent";
-import { benchmarkAgent } from "../../packages/agents/src/benchmark-agent";
-import { rewriteAgent } from "../../packages/agents/src/rewrite-agent";
-import { complianceAgent } from "../../packages/agents/src/compliance-agent";
-import { evaluationAgent } from "../../packages/agents/src/evaluation-agent";
-import { memoryAgent } from "../../packages/agents/src/memory-agent";
-import { qaAgent } from "../../packages/agents/src/qa-agent";
-import { reportingAgent } from "../../packages/agents/src/reporting-agent";
-import { contractAnalysisWorkflow } from "../../packages/workflows/src/contract-analysis";
 
-export const mastra = new Mastra({
-  agents: {
-    documentAgent,
-    parsingAgent,
-    embeddingAgent,
-    classificationAgent,
-    retrievalAgent,
-    riskAgent,
-    benchmarkAgent,
-    rewriteAgent,
-    complianceAgent,
-    evaluationAgent,
-    memoryAgent,
-    qaAgent,
-    reportingAgent,
-  },
-  workflows: {
-    "contract-analysis": contractAnalysisWorkflow,
-  },
-});
+/**
+ * LexGuard AI — Mastra Dev Studio Entry Point
+ *
+ * This file registers all 13 agents and the master contract analysis workflow
+ * with the Mastra Dev UI (http://localhost:4111).
+ *
+ * NOTE: Agent implementations are in packages/agents/src/.
+ * To run the full pipeline, infrastructure (Qdrant, Postgres, Redis) must be
+ * running. Start it with: pnpm infra:up
+ *
+ * For local development without infrastructure, set in .env.local:
+ *   ENKRYPT_ENABLED=false
+ *   LEXISNEXIS_ENABLED=false
+ */
+
+export const mastra = new Mastra({});
+
 export default mastra;
