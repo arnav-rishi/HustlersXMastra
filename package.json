@@ -25,7 +25,7 @@
     "clean": "turbo run clean && rimraf node_modules **/node_modules"
   },
   "devDependencies": {
-    "@ai-sdk/openai": "^1.1.9",
+    "@ai-sdk/azure": "^1.1.0",
     "@mastra/core": "^1.50.0",
     "mastra": "^1.18.0",
     "zod": "^4.0.0",
