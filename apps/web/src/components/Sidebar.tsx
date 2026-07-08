@@ -13,6 +13,9 @@ const navItems = [
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const qdrantDashboardUrl =
+    process.env.NEXT_PUBLIC_QDRANT_DASHBOARD_URL ??
+    "http://localhost:6333/dashboard";
 
   return (
     <aside className="sidebar">
@@ -38,7 +41,7 @@ export default function Sidebar() {
         })}
 
         <div className="nav-section-label" style={{ marginTop: 24 }}>Infrastructure</div>
-        <a href="http://localhost:6333/dashboard" target="_blank" className="nav-item">
+        <a href={qdrantDashboardUrl} target="_blank" className="nav-item">
           <span className="nav-icon">🗄</span> Qdrant
         </a>
         <a href="http://localhost:3001" target="_blank" className="nav-item">

@@ -1,25 +1,82 @@
 "use client";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import Link from "next/link";
+import { API_BASE_URL, getApiHeaders } from "@/lib/api";
 
-const MOCK_CONTRACTS = [
-  { id: "c-001", name: "Acme Corp — SaaS Subscription Agreement v3.pdf", type: "SaaS", risk: "high",   status: "pending",   date: "2026-07-07", score: 78 },
-  { id: "c-002", name: "TechFlow — NDA Mutual Confidentiality 2026.pdf",  type: "NDA", risk: "low",    status: "complete",  date: "2026-07-06", score: 12 },
-  { id: "c-003", name: "GlobalEdge — Master Service Agreement Q3.pdf",    type: "MSA", risk: "medium", status: "reviewing", date: "2026-07-06", score: 54 },
-  { id: "c-004", name: "Nexus Labs — IP Assignment & License Grant.pdf",  type: "IP",  risk: "high",   status: "pending",   date: "2026-07-05", score: 91 },
-  { id: "c-005", name: "Orbit Systems — Employment Agreement Sr.Eng.pdf", type: "EMP", risk: "low",    status: "complete",  date: "2026-07-04", score: 8  },
-];
+type DashboardContract = {
+  id: string;
+  name: string;
+  type: string;
+  risk: string;
+  status: string;
+  date: string;
+};
+
 
 export default function DashboardPage() {
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadMessage, setUploadMessage] = useState<string | null>(null);
+  const [recentContracts, setRecentContracts] = useState<DashboardContract[]>([]);
+  const [fileInputKey, setFileInputKey] = useState(0);
 
-  const onDrop = useCallback((e: React.DragEvent) => {
+  const fetchRecentContracts = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/contracts/pending`, {
+        headers: getApiHeaders(),
+      });
+      if (!response.ok) {
+        return;
+      }
+      const payload = await response.json();
+      setRecentContracts(Array.isArray(payload.items) ? payload.items : []);
+    } catch {
+      // Keep dashboard usable if API is unavailable.
+      setRecentContracts([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchRecentContracts();
+  }, [fetchRecentContracts]);
+
+  const analyzeContract = useCallback(async (file: File) => {
+    setUploading(true);
+    setUploadMessage(null);
+    try {
+      const contractText = await file.text();
+      const response = await fetch(`${API_BASE_URL}/api/v1/contracts/analyze`, {
+        method: "POST",
+        headers: getApiHeaders(true),
+        body: JSON.stringify({
+          fileName: file.name,
+          contractText,
+          jurisdiction: "Unknown",
+          priority: "standard",
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to start analysis");
+      }
+
+      setUploadMessage("Contract accepted. 13-agent workflow started.");
+      await fetchRecentContracts();
+    } catch {
+      setUploadMessage("Unable to start analysis. Check API and retry.");
+    } finally {
+      setUploading(false);
+      setFileInputKey((prev) => prev + 1);
+    }
+  }, [fetchRecentContracts]);
+
+  const onDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     setDragging(false);
-    setUploading(true);
-    setTimeout(() => setUploading(false), 2500);
-  }, []);
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+    await analyzeContract(file);
+  }, [analyzeContract]);
 
   return (
     <>
@@ -75,7 +132,18 @@ export default function DashboardPage() {
             onDrop={onDrop}
             onClick={() => document.getElementById("file-input")?.click()}
           >
-            <input id="file-input" type="file" accept=".pdf,.docx,.doc" style={{ display: "none" }} />
+            <input
+              key={fileInputKey}
+              id="file-input"
+              type="file"
+              accept=".pdf,.docx,.doc,.txt"
+              style={{ display: "none" }}
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                await analyzeContract(file);
+              }}
+            />
             {uploading ? (
               <>
                 <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
@@ -100,6 +168,11 @@ export default function DashboardPage() {
               </>
             )}
           </div>
+          {uploadMessage ? (
+            <div className="card card-sm mt-4" style={{ fontSize: 12.5, color: "var(--text-secondary)" }}>
+              {uploadMessage}
+            </div>
+          ) : null}
 
           <div className="card card-sm mt-4">
             <div className="section-title" style={{ marginBottom: 12 }}>Pipeline Steps</div>
@@ -126,7 +199,7 @@ export default function DashboardPage() {
                 </tr>
               </thead>
               <tbody>
-                {MOCK_CONTRACTS.map((c) => (
+                {recentContracts.map((c) => (
                   <tr key={c.id}>
                     <td>
                       <Link href={`/contracts/${c.id}`} style={{ color: "var(--text-primary)" }}>
@@ -135,16 +208,23 @@ export default function DashboardPage() {
                       </Link>
                     </td>
                     <td>
-                      <span className={`risk-badge ${c.risk}`}>{c.risk.toUpperCase()}</span>
+                      <span className={`risk-badge ${c.risk === "critical" ? "high" : c.risk}`}>{c.risk.toUpperCase()}</span>
                     </td>
                     <td>
                       <span className={`status-chip ${c.status}`}>{c.status}</span>
                     </td>
-                    <td style={{ color: c.score > 70 ? "var(--risk-high)" : c.score > 40 ? "var(--risk-med)" : "var(--risk-low)", fontWeight: 700 }}>
-                      {c.score}
+                    <td style={{ color: "var(--text-secondary)", fontWeight: 700 }}>
+                      --
                     </td>
                   </tr>
                 ))}
+                {recentContracts.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} style={{ color: "var(--text-muted)" }}>
+                      No pending contracts found in database.
+                    </td>
+                  </tr>
+                ) : null}
               </tbody>
             </table>
           </div>

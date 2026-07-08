@@ -87,6 +87,9 @@ model Contract {
   jurisdiction String?          @db.VarChar(50)
   status       ContractStatus   @default(QUEUED)
   workflowId   String?          @map("workflow_id") @db.Uuid
+  workflowStatus String         @default("queued") @map("workflow_status") @db.VarChar(50)
+  workflowStep String?          @map("workflow_step") @db.VarChar(100)
+  progressPct  Int              @default(0) @map("progress_pct")
   pageCount    Int?             @map("page_count")
   // PII: encrypted before storage
   partyNames   String[]         @map("party_names")
@@ -94,6 +97,7 @@ model Contract {
   contractTitle String?         @map("contract_title") @db.VarChar(500)
   overallRisk  RiskLevel?       @map("overall_risk")
   reportId     String?          @map("report_id") @db.Uuid
+  analysisJson Json?            @map("analysis_json")
   createdAt    DateTime         @default(now()) @map("created_at")
   completedAt  DateTime?        @map("completed_at")
 
@@ -102,11 +106,32 @@ model Contract {
   uploader     User          @relation("Uploader", fields: [uploadedBy], references: [id])
   auditLogs    AuditLog[]
   hitlItems    HitlQueueItem[]
+  clauses      Clause[]
 
   @@index([orgId])
   @@index([status])
   @@index([createdAt])
   @@map("contracts")
+}
+
+model Clause {
+  id            String     @id @default(uuid()) @db.Uuid
+  contractId    String     @map("contract_id") @db.Uuid
+  clauseIndex   Int        @map("clause_index")
+  clauseType    String?    @map("clause_type") @db.VarChar(100)
+  clauseText    String     @map("clause_text") @db.Text
+  riskLevel     RiskLevel? @map("risk_level")
+  riskScore     Int?       @map("risk_score")
+  rewriteOptionA String?   @map("rewrite_option_a") @db.Text
+  rewriteOptionB String?   @map("rewrite_option_b") @db.Text
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
+
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  @@index([contractId])
+  @@index([clauseIndex])
+  @@map("clauses")
 }
 
 enum DocumentType {

@@ -34,10 +34,15 @@ import helmet from "helmet";
 import cors from "cors";
 import compression from "compression";
 import { contractsRouter } from "./routes/contracts";
+import { PrismaClient } from "@prisma/client";
+import Redis from "ioredis";
+import { getQdrantClient } from "@lexguard/qdrant/client";
 
 // ─── App Setup ────────────────────────────────────────────────────────────────
 
 const app = express();
+const prisma = new PrismaClient();
+const redis = new Redis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 1 });
 
 // ─── Security Headers ─────────────────────────────────────────────────────────
 // Helmet sets HSTS, CSP, X-Frame-Options, etc.
@@ -97,11 +102,30 @@ app.get("/health", (_req, res) => {
 });
 
 app.get("/ready", async (_req, res) => {
-  // Check dependencies
-  const checks: Record<string, "ok" | "degraded"> = {
-    api: "ok",
-    // In production: also check Qdrant, Postgres, Redis health
-  };
+  const checks: Record<string, "ok" | "degraded"> = { api: "ok" };
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    checks.postgres = "ok";
+  } catch {
+    checks.postgres = "degraded";
+  }
+  try {
+    await redis.connect();
+    await redis.ping();
+    checks.redis = "ok";
+  } catch {
+    checks.redis = "degraded";
+  } finally {
+    if (redis.status === "ready") {
+      await redis.quit();
+    }
+  }
+  try {
+    const healthy = await getQdrantClient().healthCheck();
+    checks.qdrant = healthy ? "ok" : "degraded";
+  } catch {
+    checks.qdrant = "degraded";
+  }
 
   const allOk = Object.values(checks).every((v) => v === "ok");
   res.status(allOk ? 200 : 503).json({
@@ -146,8 +170,12 @@ app.use(
 
 // ─── Server Startup ───────────────────────────────────────────────────────────
 
-const server = app.listen(env.API_PORT, env.API_HOST, () => {
-  console.log(`
+let server: ReturnType<typeof app.listen> | null = null;
+
+function startServer() {
+  if (server) return server;
+  server = app.listen(env.API_PORT, env.API_HOST, () => {
+    console.log(`
 ╔════════════════════════════════════════╗
 ║       LexGuard AI — API Gateway        ║
 ╚════════════════════════════════════════╝
@@ -158,15 +186,25 @@ const server = app.listen(env.API_PORT, env.API_HOST, () => {
   LexisNexis: ${env.LEXISNEXIS_ENABLED ? "✅ enabled" : "⚠️  disabled"}
   HITL: ${env.HITL_ENABLED ? "✅ enabled" : "⚠️  disabled"}
 `);
-});
+  });
+  return server;
+}
 
 // Graceful shutdown (Disposability — 12-Factor)
 process.on("SIGTERM", () => {
   console.log("[LexGuard][API] SIGTERM received. Graceful shutdown...");
+  if (!server) {
+    process.exit(0);
+    return;
+  }
   server.close(() => {
     console.log("[LexGuard][API] HTTP server closed.");
     process.exit(0);
   });
 });
 
-export { app, server };
+if (process.env.NODE_ENV !== "test") {
+  startServer();
+}
+
+export { app, startServer };

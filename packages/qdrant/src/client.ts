@@ -9,12 +9,10 @@
  */
 
 import { QdrantClient as QdrantBaseClient } from "@qdrant/js-client-rest";
-import type {
-  SearchRequest,
-  UpsertCollection,
-  PointStruct,
-  Filter,
-} from "@qdrant/js-client-rest";
+type SearchRequest = any;
+type UpsertCollection = any;
+type PointStruct = any;
+type Filter = any;
 import { getEnv } from "@lexguard/shared/env";
 import { RETRY, SLA } from "@lexguard/shared/constants";
 
@@ -228,7 +226,7 @@ export class LexGuardQdrantClient {
       });
     }, `delete_by_filter:${collection}`);
 
-    return result.result?.deleted ?? 0;
+    return (result as any).result?.deleted ?? 0;
   }
 
   // ─── Collection Management ─────────────────────────────────────────────────

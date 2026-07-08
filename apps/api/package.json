@@ -10,7 +10,8 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
-    "db:seed": "tsx prisma/seed.ts"
+    "db:seed": "tsx prisma/seed.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@lexguard/shared": "workspace:*",
@@ -40,8 +41,11 @@
     "@types/jsonwebtoken": "^9.0.6",
     "@types/uuid": "^10.0.0",
     "@types/node": "^20.14.0",
+    "@types/supertest": "^6.0.2",
     "prisma": "^5.15.0",
     "typescript": "^5.4.5",
-    "tsx": "^4.15.0"
+    "tsx": "^4.15.0",
+    "supertest": "^7.1.1",
+    "vitest": "^2.1.9"
   }
 }

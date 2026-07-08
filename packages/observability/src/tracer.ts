@@ -50,11 +50,11 @@ export function initTracer(serviceName?: string): void {
       [SemanticResourceAttributes.SERVICE_VERSION]: "1.0.0",
       "lexguard.environment": env.NODE_ENV,
     }),
-    spanProcessor: new BatchSpanProcessor(traceExporter),
+    spanProcessor: new BatchSpanProcessor(traceExporter) as any,
     metricReader: new PeriodicExportingMetricReader({
       exporter: metricExporter,
       exportIntervalMillis: 15_000,
-    }),
+    }) as any,
     textMapPropagator: new W3CTraceContextPropagator(),
   });
 

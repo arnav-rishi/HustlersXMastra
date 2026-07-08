@@ -1,40 +1,14 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
+import { API_BASE_URL, getApiHeaders } from "@/lib/api";
 
 const CONTRACTS = [
-  { id: "c-001", name: "Acme Corp — SaaS Subscription Agreement v3.pdf" },
-  { id: "c-002", name: "TechFlow — NDA Mutual Confidentiality 2026.pdf" },
-  { id: "c-003", name: "GlobalEdge — Master Service Agreement Q3.pdf" },
+  { id: "00000000-0000-0000-0000-000000000101", name: "Acme Corp — SaaS Subscription Agreement v3.pdf" },
+  { id: "00000000-0000-0000-0000-000000000102", name: "TechFlow — NDA Mutual Confidentiality 2026.pdf" },
+  { id: "00000000-0000-0000-0000-000000000103", name: "GlobalEdge — Master Service Agreement Q3.pdf" },
 ];
 
 type Message = { role: "user" | "ai"; text: string; citations?: string[] };
-
-const MOCK_RESPONSES: Record<string, { text: string; citations: string[] }> = {
-  default: {
-    text: "Based on my analysis of the contract, the liability limitation clause (Section 12.3) is the highest risk item. The vendor has capped their maximum exposure to $500 and included a broad consequential damages waiver with no carve-outs for gross negligence. This is materially unfavourable to your company.",
-    citations: ["Section 12.3 — Limitation of Liability", "Section 12.4 — Consequential Damages Waiver"],
-  },
-  liability: {
-    text: "The liability cap is set at the lower of $500 or fees paid in the prior 3 months. Market standard for SaaS contracts of this size is typically 12 months' fees. I recommend negotiating this to a minimum of $50,000 or 12 months' subscription fees, whichever is greater.",
-    citations: ["Section 12.3", "Benchmark: legal_templates collection (87th percentile unfavourable)"],
-  },
-  termination: {
-    text: "The termination clause (Section 15) allows the vendor to terminate with 90 days notice for any reason while requiring you to pay outstanding fees. The auto-renewal notice period of 90 days is significantly above market standard of 30 days. I recommend reducing this to 30 days and adding a price cap on renewals.",
-    citations: ["Section 15.1 — Termination for Convenience", "Section 15.4 — Auto-Renewal"],
-  },
-  gdpr: {
-    text: "The data processing provisions lack a compliant Article 28 Data Processing Agreement. The current language in Section 8.2 gives the vendor an irrevocable licence to Customer Data for 'service improvement' purposes, which is not permissible under GDPR for Controller-Processor relationships. A DPA must be executed before data transfer.",
-    citations: ["Section 8.2 — Data Usage", "GDPR Article 28 — Processor Obligations", "Jurisdiction Rule: EU-GDPR"],
-  },
-};
-
-function getMockResponse(query: string) {
-  const lower = query.toLowerCase();
-  if (lower.includes("liability") || lower.includes("cap")) return MOCK_RESPONSES.liability;
-  if (lower.includes("terminat") || lower.includes("renewal")) return MOCK_RESPONSES.termination;
-  if (lower.includes("gdpr") || lower.includes("data") || lower.includes("privacy")) return MOCK_RESPONSES.gdpr;
-  return MOCK_RESPONSES.default;
-}
 
 export default function QAPage() {
   const [selectedContract, setSelectedContract] = useState(CONTRACTS[0].id);
@@ -54,10 +28,40 @@ export default function QAPage() {
     setMessages(prev => [...prev, { role: "user", text: userMsg }]);
     setLoading(true);
 
-    await new Promise(r => setTimeout(r, 1200));
-    const resp = getMockResponse(userMsg);
-    setMessages(prev => [...prev, { role: "ai", text: resp.text, citations: resp.citations }]);
-    setLoading(false);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/contracts/qa`, {
+        method: "POST",
+        headers: getApiHeaders(true),
+        body: JSON.stringify({
+          contractId: selectedContract,
+          orgId: "00000000-0000-0000-0000-000000000001",
+          question: userMsg,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("QA request failed");
+      }
+      const payload = await response.json();
+      setMessages(prev => [
+        ...prev,
+        {
+          role: "ai",
+          text: payload.answer ?? "No answer returned by the QA agent.",
+          citations: Array.isArray(payload.citations) ? payload.citations : [],
+        },
+      ]);
+    } catch {
+      setMessages(prev => [
+        ...prev,
+        {
+          role: "ai",
+          text: "The QA service is unavailable right now. Please verify API and infra services.",
+          citations: [],
+        },
+      ]);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const suggestions = ["What are the top 3 risks?", "Explain the liability cap", "Is this GDPR compliant?", "What's the termination notice period?", "Summarise the IP ownership clause"];

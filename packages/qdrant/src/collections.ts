@@ -12,7 +12,7 @@
  * All collections use text-embedding-3-large (1536 dimensions).
  */
 
-import type { CreateCollection } from "@qdrant/js-client-rest";
+type CreateCollection = any;
 import { EMBEDDING_DIMENSIONS, QDRANT_COLLECTIONS } from "@lexguard/shared/constants";
 
 // ─── Vector Config Helpers ────────────────────────────────────────────────────

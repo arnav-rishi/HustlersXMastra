@@ -24,6 +24,9 @@ import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import { authMiddleware, requireRole } from "../middleware/auth";
 import { triggerContractAnalysis } from "@lexguard/workflows/contract-analysis";
+import { executeQAAgent } from "@lexguard/agents/qa-agent";
+import { executeMemoryAgent } from "@lexguard/agents/memory-agent";
+import { PrismaClient } from "@prisma/client";
 import {
   ContractUploadRequestSchema,
   QARequestSchema,
@@ -32,6 +35,71 @@ import {
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
 
 export const contractsRouter = Router();
+const prisma = new PrismaClient();
+
+function getDocumentTypeFromMime(mimeType: string): "DIGITAL_PDF" | "SCANNED_PDF" | "DOCX" {
+  if (mimeType.includes("wordprocessingml")) {
+    return "DOCX";
+  }
+  return "DIGITAL_PDF";
+}
+
+async function createQueuedContract(params: {
+  orgId: string;
+  uploadedBy: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  s3Key: string;
+  jurisdiction?: string;
+}) {
+  return prisma.contract.create({
+    data: {
+      orgId: params.orgId,
+      uploadedBy: params.uploadedBy,
+      fileName: params.fileName,
+      fileSize: BigInt(params.fileSize),
+      mimeType: params.mimeType,
+      documentType: getDocumentTypeFromMime(params.mimeType),
+      s3Key: params.s3Key,
+      jurisdiction: params.jurisdiction,
+      status: "QUEUED",
+      workflowStatus: "queued",
+      workflowStep: "document-validation",
+      progressPct: 0,
+      partyNames: [],
+    },
+    select: {
+      id: true,
+    },
+  });
+}
+
+async function createAuditLog(params: {
+  orgId: string;
+  contractId?: string;
+  traceId?: string;
+  spanId?: string;
+  agentId: string;
+  eventType: string;
+  payload?: Record<string, unknown>;
+}) {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        traceId: params.traceId ?? uuidv4().replace(/-/g, ""),
+        spanId: params.spanId ?? uuidv4().replace(/-/g, "").slice(0, 16),
+        orgId: params.orgId,
+        contractId: params.contractId,
+        agentId: params.agentId,
+        eventType: params.eventType,
+        payload: params.payload,
+      },
+    });
+  } catch (err) {
+    console.warn("[LexGuard][API] Failed to create audit log:", err);
+  }
+}
 
 // File upload middleware (memory storage; will stream to S3)
 const upload = multer({
@@ -88,8 +156,19 @@ contractsRouter.post(
       const s3Key = `${req.orgId}/${uuidv4()}/${req.file.originalname}`;
       const rawFileUrl = `https://${process.env.S3_BUCKET_NAME}.s3.amazonaws.com/${s3Key}`;
 
+      const createdContract = await createQueuedContract({
+        orgId: req.orgId!,
+        uploadedBy: req.user!.sub,
+        fileName: req.file.originalname,
+        fileSize: req.file.size,
+        mimeType: req.file.mimetype,
+        jurisdiction: bodyResult.data.jurisdiction,
+        s3Key,
+      });
+
       // Trigger the Mastra contract analysis workflow
       const { workflowId, contractId } = await triggerContractAnalysis({
+        contractId: createdContract.id,
         orgId: req.orgId!,
         tenantId: req.tenantId!,
         uploadedBy: req.user!.sub,
@@ -101,6 +180,28 @@ contractsRouter.post(
         priority: bodyResult.data.priority,
         traceId: req.traceId!,
         spanId: uuidv4(),
+      });
+
+      await prisma.contract.update({
+        where: { id: createdContract.id },
+        data: {
+          workflowId,
+          status: "PROCESSING",
+          workflowStatus: "processing",
+          workflowStep: "document-validation",
+          progressPct: 10,
+        },
+      });
+      await createAuditLog({
+        orgId: req.orgId!,
+        contractId: createdContract.id,
+        traceId: req.traceId,
+        agentId: "api-gateway",
+        eventType: "contract_analysis_started",
+        payload: {
+          workflowId,
+          endpoint: "upload",
+        },
       });
 
       return res.status(202).json({
@@ -121,6 +222,99 @@ contractsRouter.post(
   }
 );
 
+// ─── POST /api/v1/contracts/analyze (Phase 6 wiring endpoint) ───────────────
+
+const AnalyzeContractBodySchema = z.object({
+  contractText: z.string().min(1, "contractText is required"),
+  fileName: z.string().optional(),
+  jurisdiction: z.string().optional(),
+  priority: z.enum(["standard", "urgent"]).optional(),
+});
+
+const PaginationQuerySchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().positive().max(100).default(25),
+});
+
+contractsRouter.post(
+  "/analyze",
+  authMiddleware,
+  async (req: Request, res: Response) => {
+    const body = AnalyzeContractBodySchema.safeParse(req.body);
+    if (!body.success) {
+      return res.status(400).json({
+        error: "VALIDATION_ERROR",
+        message: "Request validation failed",
+        details: body.error.flatten().fieldErrors,
+      });
+    }
+
+    const contractText = body.data.contractText;
+    try {
+      const s3Key = `${req.orgId}/${uuidv4()}/${body.data.fileName ?? "inline-contract.txt"}`;
+      const createdContract = await createQueuedContract({
+        orgId: req.orgId!,
+        uploadedBy: req.user!.sub,
+        fileName: body.data.fileName ?? "inline-contract.txt",
+        fileSize: Buffer.byteLength(contractText, "utf8"),
+        mimeType: "text/plain",
+        jurisdiction: body.data.jurisdiction,
+        s3Key,
+      });
+
+      const { workflowId, contractId } = await triggerContractAnalysis({
+        contractId: createdContract.id,
+        orgId: req.orgId!,
+        tenantId: req.tenantId!,
+        uploadedBy: req.user!.sub,
+        rawFileUrl: "https://lexguard.local/inline-contract.txt",
+        fileName: body.data.fileName ?? "inline-contract.txt",
+        fileSize: Buffer.byteLength(contractText, "utf8"),
+        mimeType: "text/plain",
+        jurisdiction: body.data.jurisdiction ?? "Unknown",
+        priority: body.data.priority ?? "standard",
+        traceId: req.traceId!,
+        spanId: uuidv4().replace(/-/g, "").slice(0, 16),
+      });
+
+      await prisma.contract.update({
+        where: { id: createdContract.id },
+        data: {
+          workflowId,
+          status: "PROCESSING",
+          workflowStatus: "processing",
+          workflowStep: "document-validation",
+          progressPct: 10,
+        },
+      });
+      await createAuditLog({
+        orgId: req.orgId!,
+        contractId: createdContract.id,
+        traceId: req.traceId,
+        agentId: "api-gateway",
+        eventType: "contract_analysis_started",
+        payload: {
+          workflowId,
+          endpoint: "analyze",
+        },
+      });
+
+      return res.status(202).json({
+        contractId,
+        workflowId,
+        status: "processing",
+        estimatedCompletionMs: 15_000,
+      });
+    } catch (err) {
+      console.error("[LexGuard][API] Analyze error:", err);
+      return res.status(500).json({
+        error: "INTERNAL_ERROR",
+        message: "Failed to start contract analysis workflow",
+      });
+    }
+  }
+);
+
 // ─── GET /api/v1/contracts/:id/analysis ──────────────────────────────────────
 
 contractsRouter.get(
@@ -128,15 +322,72 @@ contractsRouter.get(
   authMiddleware,
   async (req: Request, res: Response) => {
     const { id } = req.params;
-
-    // In production: query Postgres for the completed analysis report
-    // and verify org_id === req.orgId (tenant isolation)
-    return res.status(200).json({
-      contractId: id,
-      orgId: req.orgId,
-      status: "completed",
-      message: "Analysis report retrieval — Phase 4 implementation pending",
+    const contract = await prisma.contract.findFirst({
+      where: {
+        id,
+        orgId: req.orgId,
+      },
+      select: {
+        id: true,
+        status: true,
+        workflowStatus: true,
+        analysisJson: true,
+        reportId: true,
+        completedAt: true,
+      },
     });
+    if (!contract) {
+      return res.status(404).json({
+        error: "NOT_FOUND",
+        message: "Contract not found for this tenant",
+      });
+    }
+    return res.status(200).json({
+      contractId: contract.id,
+      status: contract.status.toLowerCase(),
+      workflowStatus: contract.workflowStatus,
+      reportId: contract.reportId,
+      completedAt: contract.completedAt,
+      analysis: contract.analysisJson ?? null,
+    });
+  }
+);
+
+contractsRouter.get(
+  "/:id/report",
+  authMiddleware,
+  async (req: Request, res: Response) => {
+    const contract = await prisma.contract.findFirst({
+      where: {
+        id: req.params.id,
+        orgId: req.orgId,
+      },
+      select: {
+        id: true,
+        analysisJson: true,
+      },
+    });
+    if (!contract) {
+      return res.status(404).json({
+        error: "NOT_FOUND",
+        message: "Contract not found for this tenant",
+      });
+    }
+    if (!contract.analysisJson) {
+      return res.status(409).json({
+        error: "REPORT_NOT_READY",
+        message: "Analysis report not available yet",
+      });
+    }
+
+    return res
+      .status(200)
+      .setHeader("Content-Type", "application/json")
+      .setHeader(
+        "Content-Disposition",
+        `attachment; filename="contract-${contract.id}-report.json"`
+      )
+      .send(JSON.stringify(contract.analysisJson, null, 2));
   }
 );
 
@@ -147,14 +398,36 @@ contractsRouter.get(
   authMiddleware,
   async (req: Request, res: Response) => {
     const { id } = req.params;
-
-    // In production: query Mastra workflow run status
+    const contract = await prisma.contract.findFirst({
+      where: {
+        id,
+        orgId: req.orgId,
+      },
+      select: {
+        id: true,
+        status: true,
+        workflowStatus: true,
+        workflowStep: true,
+        progressPct: true,
+        updatedAt: true,
+      },
+    });
+    if (!contract) {
+      return res.status(404).json({
+        error: "NOT_FOUND",
+        message: "Contract not found for this tenant",
+      });
+    }
     return res.status(200).json({
-      contractId: id,
-      workflowStatus: "processing",
-      currentStep: "embedding",
-      progress: 30,
-      estimatedRemainingMs: 10_000,
+      contractId: contract.id,
+      workflowStatus: contract.workflowStatus,
+      currentStep: contract.workflowStep ?? "unknown",
+      progress: contract.progressPct,
+      status: contract.status.toLowerCase(),
+      updatedAt:
+        contract.updatedAt instanceof Date
+          ? contract.updatedAt.toISOString()
+          : null,
     });
   }
 );
@@ -177,17 +450,72 @@ contractsRouter.post(
       });
     }
 
-    // In production: trigger Legal Q&A pipeline
-    return res.status(200).json({
-      answer: "Q&A pipeline — Phase 2 implementation pending",
-      citations: [],
-      readabilityScore: 0,
-      enkryptConfidence: 0,
-      sessionId: bodyResult.data.sessionId ?? uuidv4(),
-      requiresHitl: false,
-    });
+    try {
+      const qaResponse = await executeQAAgent({
+        ...bodyResult.data,
+        userId: req.user!.sub,
+      });
+
+      return res.status(200).json(qaResponse);
+    } catch (err) {
+      console.error("[LexGuard][API] QA error:", err);
+      return res.status(500).json({
+        error: "INTERNAL_ERROR",
+        message: "Failed to process legal Q&A request",
+      });
+    }
   }
 );
+
+// ─── GET /api/v1/contracts/pending ────────────────────────────────────────────
+
+contractsRouter.get("/pending", authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const query = PaginationQuerySchema.parse(req.query);
+    const skip = (query.page - 1) * query.pageSize;
+    const pendingContracts = await prisma.contract.findMany({
+      where: {
+        orgId: req.orgId,
+        status: {
+          in: ["QUEUED", "PROCESSING", "HITL_REQUIRED"],
+        },
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+      take: query.pageSize,
+      skip,
+      select: {
+        id: true,
+        fileName: true,
+        documentType: true,
+        status: true,
+        overallRisk: true,
+        createdAt: true,
+      },
+    });
+
+    return res.status(200).json({
+      items: pendingContracts.map((contract) => ({
+        id: contract.id,
+        name: contract.fileName,
+        type: contract.documentType,
+        status: contract.status.toLowerCase(),
+        risk: contract.overallRisk?.toLowerCase() ?? "unknown",
+        date: contract.createdAt.toISOString().slice(0, 10),
+      })),
+      total: pendingContracts.length,
+      page: query.page,
+      pageSize: query.pageSize,
+    });
+  } catch (err) {
+    console.error("[LexGuard][API] Pending contracts error:", err);
+    return res.status(500).json({
+      error: "INTERNAL_ERROR",
+      message: "Failed to query pending contracts",
+    });
+  }
+});
 
 // ─── GET /api/v1/hitl/queue ───────────────────────────────────────────────────
 
@@ -196,11 +524,83 @@ contractsRouter.get(
   authMiddleware,
   requireRole("legal_counsel"),
   async (req: Request, res: Response) => {
-    // In production: query Postgres hitl_queue WHERE org_id = req.orgId AND status = 'pending'
+    const query = PaginationQuerySchema.parse(req.query);
+    const skip = (query.page - 1) * query.pageSize;
+    const items = await prisma.hitlQueueItem.findMany({
+      where: {
+        orgId: req.orgId,
+        status: "PENDING",
+      },
+      orderBy: {
+        createdAt: "asc",
+      },
+      select: {
+        id: true,
+        contractId: true,
+        clauseIndex: true,
+        reason: true,
+        confidenceScore: true,
+        status: true,
+        createdAt: true,
+        slaDeadline: true,
+      },
+      take: query.pageSize,
+      skip,
+    });
     return res.status(200).json({
-      items: [],
-      total: 0,
+      items: items.map((item) => ({
+        id: item.id,
+        contractId: item.contractId,
+        clauseIndex: item.clauseIndex,
+        reason: item.reason.toLowerCase(),
+        confidenceScore: item.confidenceScore,
+        status: item.status.toLowerCase(),
+        createdAt: item.createdAt,
+        slaDeadline: item.slaDeadline,
+      })),
+      total: items.length,
+      page: query.page,
+      pageSize: query.pageSize,
       orgId: req.orgId,
+    });
+  }
+);
+
+contractsRouter.get(
+  "/hitl/:id",
+  authMiddleware,
+  requireRole("legal_counsel"),
+  async (req: Request, res: Response) => {
+    const item = await prisma.hitlQueueItem.findFirst({
+      where: {
+        id: req.params.id,
+        orgId: req.orgId,
+      },
+      select: {
+        id: true,
+        contractId: true,
+        clauseIndex: true,
+        reason: true,
+        originalClause: true,
+        aiSuggestion: true,
+        riskReason: true,
+        confidenceScore: true,
+        status: true,
+        reviewerNotes: true,
+        createdAt: true,
+        slaDeadline: true,
+      },
+    });
+    if (!item) {
+      return res.status(404).json({
+        error: "NOT_FOUND",
+        message: "HITL queue item not found",
+      });
+    }
+    return res.status(200).json({
+      ...item,
+      reason: item.reason.toLowerCase(),
+      status: item.status.toLowerCase(),
     });
   }
 );
@@ -217,7 +617,9 @@ contractsRouter.post(
     const bodyResult = HitlDecisionRequestSchema.safeParse({
       itemId: id,
       reviewerId: req.user!.sub,
-      ...req.body,
+      decision: req.body.decision,
+      editedText: req.body.editedText,
+      reviewerNotes: req.body.reviewerNotes,
     });
 
     if (!bodyResult.success) {
@@ -227,14 +629,87 @@ contractsRouter.post(
       });
     }
 
-    // In production:
-    // 1. Update HITL item status in Postgres
-    // 2. Resume the suspended Mastra workflow: workflow.resume()
-    // 3. Trigger Memory Agent to update Qdrant risk_patterns + org_preferences
+    const queueItem = await prisma.hitlQueueItem.findFirst({
+      where: {
+        id,
+        orgId: req.orgId,
+      },
+    });
+    if (!queueItem) {
+      return res.status(404).json({
+        error: "NOT_FOUND",
+        message: "HITL queue item not found",
+      });
+    }
+
+    const prismaDecision =
+      bodyResult.data.decision === "approve"
+        ? "APPROVE"
+        : bodyResult.data.decision === "reject"
+          ? "REJECT"
+          : "EDIT";
+
+    await prisma.hitlQueueItem.update({
+      where: { id },
+      data: {
+        status: "DECIDED",
+        reviewerId: req.user!.sub,
+        decision: prismaDecision,
+        editedText: bodyResult.data.editedText,
+        reviewerNotes: bodyResult.data.reviewerNotes,
+        decidedAt: new Date(),
+      },
+    });
+
+    const memoryResult = await executeMemoryAgent({
+      contractId: queueItem.contractId,
+      orgId: req.orgId!,
+      userId: req.user!.sub,
+      decision: bodyResult.data.decision,
+      clauseType: "unknown",
+      clauseText: queueItem.originalClause,
+      editedText: bodyResult.data.editedText,
+      riskLevel: "moderate",
+      riskDescription: queueItem.riskReason ?? "HITL feedback",
+    });
+
+    await prisma.contract.updateMany({
+      where: {
+        id: queueItem.contractId,
+        orgId: req.orgId,
+      },
+      data: {
+        workflowStatus: "completed",
+        workflowStep: "reporting",
+        progressPct: 100,
+        status: "COMPLETED",
+        completedAt: new Date(),
+        analysisJson: {
+          hitlItemId: id,
+          decision: bodyResult.data.decision,
+          reviewerNotes: bodyResult.data.reviewerNotes ?? null,
+          memoryCollectionsUpdated: memoryResult.collectionsUpdated,
+          finalizedAt: new Date().toISOString(),
+        },
+      },
+    });
+    await createAuditLog({
+      orgId: req.orgId!,
+      contractId: queueItem.contractId,
+      traceId: req.traceId,
+      agentId: "hitl-gateway",
+      eventType: "hitl_decision_recorded",
+      payload: {
+        decision: bodyResult.data.decision,
+        memoryCollectionsUpdated: memoryResult.collectionsUpdated,
+      },
+    });
+
     return res.status(200).json({
       itemId: id,
       decision: bodyResult.data.decision,
       workflowResumed: true,
+      memoryCollectionsUpdated: memoryResult.collectionsUpdated,
       message: "HITL decision recorded. Workflow resuming.",
     });
   }
