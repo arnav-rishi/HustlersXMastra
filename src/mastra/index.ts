@@ -14,11 +14,12 @@
 
 import { Mastra } from "@mastra/core";
 import { Agent } from "@mastra/core/agent";
-import { openai } from "@ai-sdk/openai";
+import { createAzure } from "@ai-sdk/azure";
 
 // ─── Models ──────────────────────────────────────────────────────────────────
-const gpt4o     = openai("gpt-4o");
-const gpt4oMini = openai("gpt-4o-mini");
+const azure = createAzure();
+const gpt4o     = azure("gpt-4o");
+const gpt4oMini = azure("gpt-4o-mini");
 
 // ─── Agent 1: Document Validation ────────────────────────────────────────────
 const documentAgent = new Agent({
