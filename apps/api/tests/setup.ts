@@ -1,0 +1,6 @@
+process.env.NODE_ENV = "test";
+process.env.OPENAI_API_KEY = "test-key";
+process.env.DATABASE_URL =
+  "postgresql://lexguard:password@localhost:5432/lexguard_db?schema=public";
+process.env.REDIS_URL = "redis://localhost:6379";
+process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4318";

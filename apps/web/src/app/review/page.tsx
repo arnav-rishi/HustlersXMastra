@@ -1,17 +1,53 @@
 "use client";
 import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
+import { API_BASE_URL, getApiHeaders } from "@/lib/api";
 
-const QUEUE = [
-  { id: "h-001", contract: "Acme Corp — SaaS Subscription Agreement v3.pdf", type: "SaaS",    risk: "high",   confidence: 0.61, clauses: 4,  lawyer: "Sarah Mitchell", due: "2h",  jurisdiction: "US-CA" },
-  { id: "h-002", contract: "Nexus Labs — IP Assignment & License Grant.pdf",  type: "IP",     risk: "high",   confidence: 0.58, clauses: 6,  lawyer: "James Okafor",   due: "4h",  jurisdiction: "US-NY" },
-  { id: "h-003", contract: "Titan Corp — Data Processing Agreement (DPA).pdf",type: "DPA",    risk: "medium", confidence: 0.68, clauses: 2,  lawyer: "Sarah Mitchell", due: "6h",  jurisdiction: "EU-GDPR" },
-  { id: "h-004", contract: "Vertex AI — Cloud Services Frame Agreement.pdf",  type: "CSA",    risk: "medium", confidence: 0.65, clauses: 3,  lawyer: "Unassigned",      due: "12h", jurisdiction: "US-DE" },
-  { id: "h-005", contract: "BlueWave — Strategic Partnership MOU 2026.pdf",   type: "MOU",    risk: "medium", confidence: 0.66, clauses: 1,  lawyer: "James Okafor",   due: "1d",  jurisdiction: "UK-ENG" },
-  { id: "h-006", contract: "DeltaTech — Software License Perpetual.pdf",      type: "LIC",    risk: "high",   confidence: 0.55, clauses: 5,  lawyer: "Unassigned",      due: "2d",  jurisdiction: "US-TX" },
-  { id: "h-007", contract: "Solaris Corp — Vendor Services Agreement Q3.pdf", type: "VSA",    risk: "medium", confidence: 0.64, clauses: 2,  lawyer: "Unassigned",      due: "2d",  jurisdiction: "AU" },
-];
+
+type QueueItem = {
+  id: string;
+  contractId: string;
+  clauseIndex: number;
+  reason: string;
+  confidenceScore: number | null;
+  status: string;
+  createdAt: string;
+  slaDeadline: string;
+};
 
 export default function ReviewQueuePage() {
+  const [items, setItems] = useState<QueueItem[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/v1/contracts/hitl/queue`, {
+          headers: getApiHeaders(),
+        });
+        if (!response.ok) {
+          throw new Error("Failed to load review queue");
+        }
+        const payload = await response.json();
+        setItems(Array.isArray(payload.items) ? payload.items : []);
+      } catch {
+        setError("Unable to load live HITL queue.");
+      }
+    })();
+  }, []);
+
+  const stats = useMemo(() => {
+    const highRisk = items.filter((item) => (item.confidenceScore ?? 1) < 0.6).length;
+    const mediumRisk = items.filter((item) => {
+      const score = item.confidenceScore ?? 1;
+      return score >= 0.6 && score < 0.7;
+    }).length;
+    const avgConfidence = items.length
+      ? items.reduce((acc, item) => acc + (item.confidenceScore ?? 0), 0) / items.length
+      : 0;
+    return { highRisk, mediumRisk, avgConfidence };
+  }, [items]);
+
   return (
     <>
       <div className="page-header">
@@ -21,7 +57,7 @@ export default function ReviewQueuePage() {
         </div>
         <div className="flex gap-2">
           <button className="btn btn-ghost btn-sm">⬇ Export Queue</button>
-          <div className="tag">7 PENDING</div>
+          <div className="tag">{items.length} PENDING</div>
         </div>
       </div>
 
@@ -29,17 +65,17 @@ export default function ReviewQueuePage() {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 24 }}>
         <div className="card card-sm" style={{ borderLeft: "3px solid var(--risk-high)" }}>
           <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>HIGH RISK</div>
-          <div style={{ fontSize: 24, fontWeight: 800, color: "var(--risk-high)" }}>3</div>
+          <div style={{ fontSize: 24, fontWeight: 800, color: "var(--risk-high)" }}>{stats.highRisk}</div>
           <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>Confidence &lt; 0.60 · Immediate action</div>
         </div>
         <div className="card card-sm" style={{ borderLeft: "3px solid var(--risk-med)" }}>
           <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>MEDIUM RISK</div>
-          <div style={{ fontSize: 24, fontWeight: 800, color: "var(--risk-med)" }}>4</div>
+          <div style={{ fontSize: 24, fontWeight: 800, color: "var(--risk-med)" }}>{stats.mediumRisk}</div>
           <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>Confidence 0.60–0.70 · Review today</div>
         </div>
         <div className="card card-sm" style={{ borderLeft: "3px solid var(--accent)" }}>
           <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>AVG CONFIDENCE</div>
-          <div style={{ fontSize: 24, fontWeight: 800, color: "var(--accent)" }}>0.62</div>
+          <div style={{ fontSize: 24, fontWeight: 800, color: "var(--accent)" }}>{stats.avgConfidence.toFixed(2)}</div>
           <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>Across pending items</div>
         </div>
       </div>
@@ -60,32 +96,43 @@ export default function ReviewQueuePage() {
             </tr>
           </thead>
           <tbody>
-            {QUEUE.map((item) => (
+            {items.map((item) => (
               <tr key={item.id}>
                 <td>
-                  <div style={{ maxWidth: 280 }} className="truncate">{item.contract}</div>
-                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{item.type}</div>
+                  <div style={{ maxWidth: 280 }} className="truncate">Contract {item.contractId}</div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>Clause #{item.clauseIndex}</div>
                 </td>
-                <td><span className={`risk-badge ${item.risk}`}>{item.risk.toUpperCase()}</span></td>
+                <td>
+                  <span className={`risk-badge ${(item.confidenceScore ?? 1) < 0.6 ? "high" : "medium"}`}>
+                    {((item.confidenceScore ?? 0) < 0.6 ? "high" : "medium").toUpperCase()}
+                  </span>
+                </td>
                 <td>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontWeight: 700, color: item.confidence < 0.60 ? "var(--risk-high)" : "var(--risk-med)" }}>
-                      {(item.confidence * 100).toFixed(0)}%
+                    <span style={{ fontWeight: 700, color: (item.confidenceScore ?? 1) < 0.60 ? "var(--risk-high)" : "var(--risk-med)" }}>
+                      {((item.confidenceScore ?? 0) * 100).toFixed(0)}%
                     </span>
                     <div className="progress-bar" style={{ width: 60 }}>
-                      <div className="progress-fill" style={{ width: `${item.confidence * 100}%`, background: item.confidence < 0.60 ? "var(--risk-high)" : "var(--risk-med)" }} />
+                      <div className="progress-fill" style={{ width: `${(item.confidenceScore ?? 0) * 100}%`, background: (item.confidenceScore ?? 1) < 0.60 ? "var(--risk-high)" : "var(--risk-med)" }} />
                     </div>
                   </div>
                 </td>
-                <td style={{ fontWeight: 700 }}>{item.clauses}</td>
-                <td><span className="tag" style={{ fontSize: 9 }}>{item.jurisdiction}</span></td>
-                <td style={{ color: item.lawyer === "Unassigned" ? "var(--text-muted)" : "var(--text-secondary)" }}>{item.lawyer}</td>
-                <td style={{ color: item.due.includes("h") ? "var(--risk-high)" : "var(--text-secondary)", fontWeight: 600 }}>{item.due}</td>
+                <td style={{ fontWeight: 700 }}>1</td>
+                <td><span className="tag" style={{ fontSize: 9 }}>N/A</span></td>
+                <td style={{ color: "var(--text-muted)" }}>Unassigned</td>
+                <td style={{ color: "var(--text-secondary)", fontWeight: 600 }}>{new Date(item.slaDeadline).toLocaleString()}</td>
                 <td>
                   <Link href={`/review/${item.id}`} className="btn btn-primary btn-sm">Review →</Link>
                 </td>
               </tr>
             ))}
+            {items.length === 0 ? (
+              <tr>
+                <td colSpan={8} style={{ color: "var(--text-muted)" }}>
+                  {error ?? "No pending HITL reviews."}
+                </td>
+              </tr>
+            ) : null}
           </tbody>
         </table>
       </div>

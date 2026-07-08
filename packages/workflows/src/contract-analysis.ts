@@ -40,6 +40,7 @@
 import { Mastra } from "@mastra/core";
 import { createWorkflow, createStep } from "@mastra/core/workflows";
 import { z } from "zod";
+import { PrismaClient } from "@prisma/client";
 import {
   DocumentAgentInputSchema,
   DocumentAgentOutputSchema,
@@ -53,6 +54,14 @@ import {
 import { executeDocumentAgent } from "@lexguard/agents/document-agent";
 import { executeParsingAgent } from "@lexguard/agents/parsing-agent";
 import { executeEmbeddingAgent } from "@lexguard/agents/embedding-agent";
+import { executeClassificationAgent } from "@lexguard/agents/classification-agent";
+import { executeRetrievalAgent } from "@lexguard/agents/retrieval-agent";
+import { executeRiskAgent } from "@lexguard/agents/risk-agent";
+import { executeBenchmarkAgent } from "@lexguard/agents/benchmark-agent";
+import { executeRewriteAgent } from "@lexguard/agents/rewrite-agent";
+import { executeComplianceAgent } from "@lexguard/agents/compliance-agent";
+import { executeEvaluationAgent } from "@lexguard/agents/evaluation-agent";
+import { executeReportingAgent } from "@lexguard/agents/reporting-agent";
 import {
   withSpan,
   OTEL_SPAN_NAMES,
@@ -68,6 +77,7 @@ const WorkflowInputSchema = z.object({
   orgId: z.string().uuid(),
   tenantId: z.string().uuid(),
   uploadedBy: z.string().uuid(),
+  contractId: z.string().uuid(),
   rawFileUrl: z.string().url(),
   fileName: z.string(),
   fileSize: z.number().positive(),
@@ -102,14 +112,12 @@ const documentValidationStep = createStep({
     backoffMultiplier: 2,
   },
   execute: async ({ inputData }) => {
-    const contractId = uuidv4();
-
     return executeDocumentAgent({
       otel: {
         traceId: inputData.traceId,
         spanId: inputData.spanId,
         orgId: inputData.orgId,
-        contractId,
+        contractId: inputData.contractId,
       },
       rawFileUrl: inputData.rawFileUrl,
       fileName: inputData.fileName,
@@ -191,20 +199,51 @@ const classificationAndRetrievalStep = createStep({
   inputSchema: EmbeddingAgentOutputSchema,
   outputSchema: z.object({
     contractId: z.string().uuid(),
-    status: z.literal("classification-retrieval-complete"),
+    clauses: z.array(z.any()),
+    retrievals: z.array(z.any()),
+    jurisdiction: z.string(),
+    orgId: z.string().uuid(),
+    tenantId: z.string().uuid(),
   }),
-  execute: async ({ inputData }) => {
-    // Phase 2: Will run Classification Agent + Retrieval Agent in parallel
-    // const [classified, retrieved] = await Promise.all([
-    //   executeClassificationAgent({ clauses }),
-    //   executeRetrievalAgent({ clauses, orgId, tenantId, jurisdiction }),
-    // ]);
-    console.log(
-      `[Workflow] Step 4 stub: Classification + Retrieval for ${inputData.contractId}`
+  execute: async ({ inputData, getInitData }) => {
+    const initData = getInitData();
+    const classified = await executeClassificationAgent({
+      otel: {
+        traceId: initData.traceId,
+        spanId: initData.spanId,
+        orgId: initData.orgId,
+        contractId: inputData.contractId,
+      },
+      contractId: inputData.contractId,
+      orgId: initData.orgId,
+      clauses: inputData.clauses,
+    });
+
+    const retrievals = await Promise.all(
+      classified.classifiedClauses.map((clause) =>
+        executeRetrievalAgent({
+          otel: {
+            traceId: initData.traceId,
+            spanId: initData.spanId,
+            orgId: initData.orgId,
+            contractId: inputData.contractId,
+          },
+          contractId: inputData.contractId,
+          orgId: initData.orgId,
+          tenantId: initData.tenantId,
+          jurisdiction: initData.jurisdiction ?? "Unknown",
+          clause,
+        })
+      )
     );
+
     return {
       contractId: inputData.contractId,
-      status: "classification-retrieval-complete" as const,
+      clauses: classified.classifiedClauses,
+      retrievals,
+      jurisdiction: initData.jurisdiction ?? "Unknown",
+      orgId: initData.orgId,
+      tenantId: initData.tenantId,
     };
   },
 });
@@ -216,19 +255,63 @@ const riskAndBenchmarkStep = createStep({
   description: "[Phase 2] Parallel: Risk Analysis + Clause Benchmarking",
   inputSchema: z.object({
     contractId: z.string().uuid(),
-    status: z.literal("classification-retrieval-complete"),
+    clauses: z.array(z.any()),
+    retrievals: z.array(z.any()),
+    jurisdiction: z.string(),
+    orgId: z.string().uuid(),
+    tenantId: z.string().uuid(),
   }),
   outputSchema: z.object({
     contractId: z.string().uuid(),
-    status: z.literal("risk-benchmark-complete"),
+    riskResults: z.array(z.any()),
+    benchmarkResults: z.array(z.any()),
+    clauses: z.array(z.any()),
+    retrievals: z.array(z.any()),
+    jurisdiction: z.string(),
+    orgId: z.string().uuid(),
+    tenantId: z.string().uuid(),
   }),
   execute: async ({ inputData }) => {
-    console.log(
-      `[Workflow] Step 5 stub: Risk + Benchmark for ${inputData.contractId}`
+    const riskResults = await Promise.all(
+      inputData.clauses.map((clause: any, index: number) =>
+        executeRiskAgent({
+          otel: {
+            traceId: "workflow",
+            spanId: "workflow",
+            orgId: inputData.orgId,
+            contractId: inputData.contractId,
+          },
+          contractId: inputData.contractId,
+          orgId: inputData.orgId,
+          jurisdiction: inputData.jurisdiction,
+          clause,
+          retrievedContext: inputData.retrievals[index],
+        })
+      )
+    );
+    const benchmarkResults = await Promise.all(
+      inputData.clauses.map((clause: any, index: number) =>
+        executeBenchmarkAgent({
+          contractId: inputData.contractId,
+          orgId: inputData.orgId,
+          jurisdiction: inputData.jurisdiction,
+          clauseIndex: clause.clauseIndex,
+          clauseType: clause.clauseType ?? "unknown",
+          clauseText: clause.clauseText,
+          retrievedTemplates: inputData.retrievals[index]?.retrievedItems ?? [],
+          retrievedPrecedents: inputData.retrievals[index]?.retrievedItems ?? [],
+        })
+      )
     );
     return {
       contractId: inputData.contractId,
-      status: "risk-benchmark-complete" as const,
+      riskResults,
+      benchmarkResults,
+      clauses: inputData.clauses,
+      retrievals: inputData.retrievals,
+      jurisdiction: inputData.jurisdiction,
+      orgId: inputData.orgId,
+      tenantId: inputData.tenantId,
     };
   },
 });
@@ -240,17 +323,57 @@ const rewriteStep = createStep({
   description: "[Phase 2] Generate 2-3 safer clause alternatives per flagged risk",
   inputSchema: z.object({
     contractId: z.string().uuid(),
-    status: z.literal("risk-benchmark-complete"),
+    riskResults: z.array(z.any()),
+    benchmarkResults: z.array(z.any()),
+    clauses: z.array(z.any()),
+    retrievals: z.array(z.any()),
+    jurisdiction: z.string(),
+    orgId: z.string().uuid(),
+    tenantId: z.string().uuid(),
   }),
   outputSchema: z.object({
     contractId: z.string().uuid(),
-    status: z.literal("rewrite-complete"),
+    rewriteResults: z.array(z.any()),
+    riskResults: z.array(z.any()),
+    benchmarkResults: z.array(z.any()),
+    clauses: z.array(z.any()),
+    retrievals: z.array(z.any()),
+    jurisdiction: z.string(),
+    orgId: z.string().uuid(),
+    tenantId: z.string().uuid(),
   }),
   execute: async ({ inputData }) => {
-    console.log(`[Workflow] Step 6 stub: Rewrite for ${inputData.contractId}`);
+    const rewriteResults = await Promise.all(
+      inputData.clauses.map((clause: any, index: number) =>
+        executeRewriteAgent({
+          otel: {
+            traceId: "workflow",
+            spanId: "workflow",
+            orgId: inputData.orgId,
+            contractId: inputData.contractId,
+          },
+          contractId: inputData.contractId,
+          orgId: inputData.orgId,
+          jurisdiction: inputData.jurisdiction,
+          clause,
+          riskReport: inputData.riskResults[index]?.riskReports?.[0],
+          orgPreferences:
+            inputData.retrievals[index]?.retrievedItems?.filter(
+              (item: any) => item.collection === "org_preferences"
+            ) ?? [],
+        })
+      )
+    );
     return {
       contractId: inputData.contractId,
-      status: "rewrite-complete" as const,
+      rewriteResults,
+      riskResults: inputData.riskResults,
+      benchmarkResults: inputData.benchmarkResults,
+      clauses: inputData.clauses,
+      retrievals: inputData.retrievals,
+      jurisdiction: inputData.jurisdiction,
+      orgId: inputData.orgId,
+      tenantId: inputData.tenantId,
     };
   },
 });
@@ -262,19 +385,59 @@ const complianceStep = createStep({
   description: "[Phase 2] Check clauses against jurisdiction-specific rules",
   inputSchema: z.object({
     contractId: z.string().uuid(),
-    status: z.literal("rewrite-complete"),
+    rewriteResults: z.array(z.any()),
+    riskResults: z.array(z.any()),
+    benchmarkResults: z.array(z.any()),
+    clauses: z.array(z.any()),
+    retrievals: z.array(z.any()),
+    jurisdiction: z.string(),
+    orgId: z.string().uuid(),
+    tenantId: z.string().uuid(),
   }),
   outputSchema: z.object({
     contractId: z.string().uuid(),
-    status: z.literal("compliance-complete"),
+    complianceResults: z.array(z.any()),
+    rewriteResults: z.array(z.any()),
+    riskResults: z.array(z.any()),
+    benchmarkResults: z.array(z.any()),
+    clauses: z.array(z.any()),
+    retrievals: z.array(z.any()),
+    jurisdiction: z.string(),
+    orgId: z.string().uuid(),
+    tenantId: z.string().uuid(),
   }),
   execute: async ({ inputData }) => {
-    console.log(
-      `[Workflow] Step 7 stub: Compliance for ${inputData.contractId}`
+    const complianceResults = await Promise.all(
+      inputData.clauses.map((clause: any, index: number) =>
+        executeComplianceAgent({
+          contractId: inputData.contractId,
+          orgId: inputData.orgId,
+          jurisdiction: inputData.jurisdiction,
+          clauseIndex: clause.clauseIndex,
+          clauseType: clause.clauseType ?? "unknown",
+          clauseText: clause.clauseText,
+          jurisdictionRules:
+            inputData.retrievals[index]?.retrievedItems?.filter(
+              (item: any) => item.collection === "jurisdiction_rules"
+            ) ?? [],
+          regulatoryDocs:
+            inputData.retrievals[index]?.retrievedItems?.filter(
+              (item: any) => item.collection === "regulatory_documents"
+            ) ?? [],
+        })
+      )
     );
     return {
       contractId: inputData.contractId,
-      status: "compliance-complete" as const,
+      complianceResults,
+      rewriteResults: inputData.rewriteResults,
+      riskResults: inputData.riskResults,
+      benchmarkResults: inputData.benchmarkResults,
+      clauses: inputData.clauses,
+      retrievals: inputData.retrievals,
+      jurisdiction: inputData.jurisdiction,
+      orgId: inputData.orgId,
+      tenantId: inputData.tenantId,
     };
   },
 });
@@ -287,7 +450,15 @@ const evaluationStep = createStep({
     "[Phase 3] Route every LLM output through Enkrypt 10-stage parallelized safety pipeline",
   inputSchema: z.object({
     contractId: z.string().uuid(),
-    status: z.literal("compliance-complete"),
+    complianceResults: z.array(z.any()),
+    rewriteResults: z.array(z.any()),
+    riskResults: z.array(z.any()),
+    benchmarkResults: z.array(z.any()),
+    clauses: z.array(z.any()),
+    retrievals: z.array(z.any()),
+    jurisdiction: z.string(),
+    orgId: z.string().uuid(),
+    tenantId: z.string().uuid(),
   }),
   outputSchema: z.object({
     contractId: z.string().uuid(),
@@ -295,18 +466,42 @@ const evaluationStep = createStep({
     confidenceScore: z.number(),
     hitlRequired: z.boolean(),
     hitlItemIds: z.array(z.string().uuid()),
+    riskResults: z.array(z.any()),
+    benchmarkResults: z.array(z.any()),
+    rewriteResults: z.array(z.any()),
+    complianceResults: z.array(z.any()),
+    jurisdiction: z.string(),
+    orgId: z.string().uuid(),
   }),
   execute: async ({ inputData }) => {
-    console.log(
-      `[Workflow] Step 8 stub: Evaluation/Enkrypt for ${inputData.contractId}`
-    );
-    // Phase 3: Will run full Enkrypt 10-stage DAG
+    const serializedOutput = JSON.stringify({
+      riskResults: inputData.riskResults,
+      benchmarkResults: inputData.benchmarkResults,
+      rewriteResults: inputData.rewriteResults,
+      complianceResults: inputData.complianceResults,
+    });
+    const evaluation = await executeEvaluationAgent({
+      contractId: inputData.contractId,
+      orgId: inputData.orgId,
+      sessionId: inputData.contractId,
+      agentId: "contract-analysis-workflow",
+      inputText: JSON.stringify(inputData.clauses),
+      outputText: serializedOutput,
+      jurisdiction: inputData.jurisdiction,
+    });
+
     return {
       contractId: inputData.contractId,
-      enkryptPass: true,
-      confidenceScore: 0.95,
-      hitlRequired: false,
-      hitlItemIds: [],
+      enkryptPass: evaluation.overallPass,
+      confidenceScore: evaluation.confidenceScore,
+      hitlRequired: evaluation.routeToHitl,
+      hitlItemIds: evaluation.routeToHitl ? [uuidv4()] : [],
+      riskResults: inputData.riskResults,
+      benchmarkResults: inputData.benchmarkResults,
+      rewriteResults: inputData.rewriteResults,
+      complianceResults: inputData.complianceResults,
+      jurisdiction: inputData.jurisdiction,
+      orgId: inputData.orgId,
     };
   },
 });
@@ -323,11 +518,25 @@ const hitlGateStep = createStep({
     confidenceScore: z.number(),
     hitlRequired: z.boolean(),
     hitlItemIds: z.array(z.string().uuid()),
+    riskResults: z.array(z.any()),
+    benchmarkResults: z.array(z.any()),
+    rewriteResults: z.array(z.any()),
+    complianceResults: z.array(z.any()),
+    jurisdiction: z.string(),
+    orgId: z.string().uuid(),
   }),
   outputSchema: z.object({
     contractId: z.string().uuid(),
     approvedForReport: z.boolean(),
     hitlItemIds: z.array(z.string().uuid()),
+    riskResults: z.array(z.any()),
+    benchmarkResults: z.array(z.any()),
+    rewriteResults: z.array(z.any()),
+    complianceResults: z.array(z.any()),
+    jurisdiction: z.string(),
+    orgId: z.string().uuid(),
+    enkryptConfidenceScores: z.record(z.number()),
+    hitlStatus: z.record(z.string()),
   }),
   // Mastra native suspend support
   execute: async ({ inputData, suspend }) => {
@@ -344,10 +553,26 @@ const hitlGateStep = createStep({
       });
     }
 
+    const hitlStatus: Record<number, string> = {};
+    const enkryptScores: Record<number, number> = {};
+    // Simulate clause-level confidence map for reporting:
+    inputData.riskResults.forEach((_, i) => {
+      hitlStatus[i] = inputData.hitlRequired ? "pending" : "not_required";
+      enkryptScores[i] = inputData.confidenceScore;
+    });
+
     return {
       contractId: inputData.contractId,
       approvedForReport: inputData.enkryptPass,
       hitlItemIds: inputData.hitlItemIds,
+      riskResults: inputData.riskResults,
+      benchmarkResults: inputData.benchmarkResults,
+      rewriteResults: inputData.rewriteResults,
+      complianceResults: inputData.complianceResults,
+      jurisdiction: inputData.jurisdiction,
+      orgId: inputData.orgId,
+      enkryptConfidenceScores: enkryptScores,
+      hitlStatus: hitlStatus,
     };
   },
 });
@@ -361,6 +586,14 @@ const reportingStep = createStep({
     contractId: z.string().uuid(),
     approvedForReport: z.boolean(),
     hitlItemIds: z.array(z.string().uuid()),
+    riskResults: z.array(z.any()),
+    benchmarkResults: z.array(z.any()),
+    rewriteResults: z.array(z.any()),
+    complianceResults: z.array(z.any()),
+    jurisdiction: z.string(),
+    orgId: z.string().uuid(),
+    enkryptConfidenceScores: z.record(z.number()),
+    hitlStatus: z.record(z.string()),
   }),
   outputSchema: z.object({
     contractId: z.string().uuid(),
@@ -368,13 +601,34 @@ const reportingStep = createStep({
     status: z.literal("completed"),
   }),
   execute: async ({ inputData }) => {
-    const reportId = uuidv4();
-    console.log(
-      `[Workflow] Step 10 stub: Report generation for ${inputData.contractId} → reportId: ${reportId}`
-    );
+    const report = await executeReportingAgent({
+      contractId: inputData.contractId,
+      orgId: inputData.orgId,
+      jurisdiction: inputData.jurisdiction,
+      riskResults: inputData.riskResults,
+      benchmarkResults: inputData.benchmarkResults,
+      rewriteResults: inputData.rewriteResults,
+      complianceResults: inputData.complianceResults,
+      enkryptConfidenceScores: inputData.enkryptConfidenceScores,
+      hitlStatus: inputData.hitlStatus as any,
+    });
+
+    const prisma = new PrismaClient();
+    await prisma.contract.update({
+      where: { id: inputData.contractId },
+      data: {
+        analysisJson: report as any,
+        reportId: report.reportId,
+        status: "COMPLETED",
+        workflowStatus: "completed",
+        completedAt: new Date(),
+        progressPct: 100,
+      },
+    });
+
     return {
       contractId: inputData.contractId,
-      reportId,
+      reportId: report.reportId,
       status: "completed" as const,
     };
   },
@@ -384,9 +638,6 @@ const reportingStep = createStep({
 
 export const contractAnalysisWorkflow = createWorkflow({
   id: "contract-analysis",
-  name: "LexGuard Contract Analysis",
-  description:
-    "End-to-end contract analysis pipeline: validation → parsing → embedding → classification → risk → rewrite → compliance → Enkrypt → HITL gate → report",
   inputSchema: WorkflowInputSchema,
   outputSchema: WorkflowOutputSchema,
 })
@@ -413,6 +664,7 @@ export const mastra = new Mastra({
 // ─── Workflow Trigger ─────────────────────────────────────────────────────────
 
 export interface TriggerContractAnalysisParams {
+  contractId: string;
   orgId: string;
   tenantId: string;
   uploadedBy: string;
@@ -447,7 +699,7 @@ export async function triggerContractAnalysis(
         .getWorkflow("contract-analysis")
         .createRun({ runId: workflowId });
 
-      await run.start({
+      void run.start({
         inputData: {
           ...params,
           jurisdiction: params.jurisdiction ?? "Unknown",
@@ -455,12 +707,8 @@ export async function triggerContractAnalysis(
         },
       });
 
-      const totalLatency = Date.now() - startTime;
-      recordContractAnalysisLatency(totalLatency);
       span.setAttribute("mastra.workflow_id", workflowId);
-      span.setAttribute("total_latency_ms", totalLatency);
-
-      return { workflowId, contractId: workflowId }; // contractId threaded from Step 1
+      return { workflowId, contractId: params.contractId };
     }
   );
 }
