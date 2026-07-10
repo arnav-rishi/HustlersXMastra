@@ -766,3 +766,44 @@ contractsRouter.get(
     });
   }
 );
+
+// ─── GET /api/v1/contracts/:id/metrics ───────────────────────────────────────
+// Returns per-stage workflow timing rows for readiness dashboarding.
+
+contractsRouter.get(
+  "/:id/metrics",
+  authMiddleware,
+  async (req: Request, res: Response) => {
+    const { id } = req.params;
+
+    const contract = await prisma.contract.findFirst({
+      where: { id, orgId: req.orgId },
+      select: { id: true },
+    });
+    if (!contract) {
+      return res.status(404).json({
+        error: "NOT_FOUND",
+        message: "Contract not found for this tenant",
+      });
+    }
+
+    const metrics = await (prisma as any).workflowStageMetric.findMany({
+      where: { contractId: id },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        stageName: true,
+        status: true,
+        durationMs: true,
+        errorMessage: true,
+        createdAt: true,
+      },
+    });
+
+    return res.status(200).json({
+      contractId: id,
+      stages: metrics,
+      totalStages: metrics.length,
+    });
+  }
+);

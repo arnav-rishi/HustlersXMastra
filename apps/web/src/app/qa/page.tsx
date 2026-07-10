@@ -41,7 +41,7 @@ export default function QAPage() {
       if (!response.ok) {
         throw new Error("QA request failed");
       }
-      const payload = await response.json();
+      const payload = (await response.json()) as { answer?: string; citations?: string[] };
       setMessages(prev => [
         ...prev,
         {
@@ -115,8 +115,8 @@ export default function QAPage() {
                 color: "var(--text-secondary)",
                 transition: "all 0.12s",
               }}
-              onMouseEnter={e => (e.currentTarget.style.borderColor = "var(--border-accent)")}
-              onMouseLeave={e => (e.currentTarget.style.borderColor = "var(--border)")}
+              onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.borderColor = "var(--border-accent)"; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.borderColor = "var(--border)"; }}
             >
               {s}
             </div>
@@ -175,7 +175,7 @@ export default function QAPage() {
               rows={2}
               placeholder="Ask about clauses, risks, compliance, negotiation…"
               value={input}
-              onChange={e => setInput(e.target.value)}
+              onChange={e => setInput((e.target as HTMLTextAreaElement).value)}
               onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
             />
             <button className="btn btn-primary" onClick={send} disabled={loading || !input.trim()}>

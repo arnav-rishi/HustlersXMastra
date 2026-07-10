@@ -28,7 +28,7 @@ export default function ReviewQueuePage() {
         if (!response.ok) {
           throw new Error("Failed to load review queue");
         }
-        const payload = await response.json();
+        const payload = (await response.json()) as { items?: QueueItem[] };
         setItems(Array.isArray(payload.items) ? payload.items : []);
       } catch {
         setError("Unable to load live HITL queue.");

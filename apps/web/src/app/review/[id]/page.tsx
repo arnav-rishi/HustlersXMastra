@@ -33,7 +33,7 @@ export default function ReviewDetailPage({ params }: { params: { id: string } })
         if (!response.ok) {
           throw new Error("Failed to load HITL item");
         }
-        const payload = await response.json();
+        const payload = (await response.json()) as HitlItem;
         setItem(payload);
       } catch {
         setError("Unable to load this HITL review item.");
@@ -142,7 +142,7 @@ export default function ReviewDetailPage({ params }: { params: { id: string } })
               className="note-input"
               placeholder="Add notes for the audit log (optional)…"
               value={note}
-              onChange={(e) => setNote(e.target.value)}
+              onChange={(e) => setNote((e.target as HTMLTextAreaElement).value)}
             />
             {error ? <div style={{ color: "var(--risk-high)", fontSize: 12 }}>{error}</div> : null}
           </div>

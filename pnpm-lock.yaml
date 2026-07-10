@@ -169,6 +169,9 @@ importers:
 
   packages/agents:
     dependencies:
+      '@lexguard/enkrypt':
+        specifier: workspace:*
+        version: link:../enkrypt
       '@lexguard/observability':
         specifier: workspace:*
         version: link:../observability

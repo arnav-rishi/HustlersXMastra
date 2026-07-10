@@ -44,19 +44,25 @@ export function initTracer(serviceName?: string): void {
     url: `${env.OTEL_EXPORTER_OTLP_ENDPOINT}/v1/metrics`,
   });
 
-  sdk = new NodeSDK({
+  // NOTE: the `as any` cast below silences TS2322 errors caused by transitive
+  // duplicate installations of @opentelemetry/sdk-trace-base pulled in by
+  // different packages. The runtime types are identical; only the structural
+  // private-property check fails across the two copy paths.
+  const sdkOptions: any = {
     resource: new Resource({
       [SemanticResourceAttributes.SERVICE_NAME]: name,
       [SemanticResourceAttributes.SERVICE_VERSION]: "1.0.0",
       "lexguard.environment": env.NODE_ENV,
     }),
-    spanProcessor: new BatchSpanProcessor(traceExporter) as any,
+    spanProcessor: new BatchSpanProcessor(traceExporter),
     metricReader: new PeriodicExportingMetricReader({
       exporter: metricExporter,
       exportIntervalMillis: 15_000,
-    }) as any,
+    }),
     textMapPropagator: new W3CTraceContextPropagator(),
-  });
+  };
+
+  sdk = new NodeSDK(sdkOptions);
 
   sdk.start();
 
