@@ -18,6 +18,9 @@ const prismaMock = {
   auditLog: {
     create: vi.fn(),
   },
+  workflowStageMetric: {
+    findMany: vi.fn(),
+  },
 };
 
 vi.mock("@prisma/client", () => {
@@ -59,6 +62,21 @@ vi.mock("@lexguard/agents/qa-agent", () => ({
 const executeMemoryAgentMock = vi.fn();
 vi.mock("@lexguard/agents/memory-agent", () => ({
   executeMemoryAgent: executeMemoryAgentMock,
+}));
+
+// Prevent initTracer / initMetrics from attempting OTLP network connections
+vi.mock("@lexguard/observability/tracer", () => ({
+  initTracer: vi.fn(),
+  withSpan: vi.fn((_name: string, _attrs: unknown, fn: (span: unknown) => unknown) =>
+    fn({ setAttribute: vi.fn(), setStatus: vi.fn(), recordException: vi.fn(), end: vi.fn() })
+  ),
+  OTEL_SPAN_NAMES: { MASTRA_WORKFLOW_START: "mastra.workflow.start" },
+  getTracer: vi.fn(() => ({ startActiveSpan: vi.fn() })),
+}));
+
+vi.mock("@lexguard/observability/metrics", () => ({
+  initMetrics: vi.fn(),
+  recordContractAnalysisLatency: vi.fn(),
 }));
 
 describe("contracts routes", () => {
@@ -299,5 +317,78 @@ describe("contracts routes", () => {
     expect(response.status).toBe(503);
     expect(response.body.ready).toBe(false);
     expect(response.body.checks.qdrant).toBe("degraded");
+  });
+
+  it("returns workflow stage metrics for a contract", async () => {
+    prismaMock.contract.findFirst.mockResolvedValue({
+      id: "00000000-0000-0000-0000-000000000101",
+    });
+    prismaMock.workflowStageMetric.findMany.mockResolvedValue([
+      {
+        id: "00000000-0000-0000-0000-000000000501",
+        stageName: "document-validation",
+        status: "completed",
+        durationMs: 320,
+        errorMessage: null,
+        createdAt: new Date("2026-07-09T00:00:00.000Z"),
+      },
+      {
+        id: "00000000-0000-0000-0000-000000000502",
+        stageName: "parsing",
+        status: "completed",
+        durationMs: 1140,
+        errorMessage: null,
+        createdAt: new Date("2026-07-09T00:00:01.000Z"),
+      },
+    ]);
+
+    const response = await request(app)
+      .get("/api/v1/contracts/00000000-0000-0000-0000-000000000101/metrics")
+      .set("x-tenant-id", "00000000-0000-0000-0000-000000000001")
+      .set("Authorization", "Bearer test");
+
+    expect(response.status).toBe(200);
+    expect(response.body.totalStages).toBe(2);
+    expect(response.body.stages[0].stageName).toBe("document-validation");
+    expect(response.body.stages[1].durationMs).toBe(1140);
+  });
+
+  it("returns 404 for metrics of unknown contract", async () => {
+    prismaMock.contract.findFirst.mockResolvedValue(null);
+
+    const response = await request(app)
+      .get("/api/v1/contracts/00000000-0000-0000-0000-000000000999/metrics")
+      .set("x-tenant-id", "00000000-0000-0000-0000-000000000001")
+      .set("Authorization", "Bearer test");
+
+    expect(response.status).toBe(404);
+    expect(response.body.error).toBe("NOT_FOUND");
+  });
+
+  it("hitl decision populates analysisJson on contract", async () => {
+    prismaMock.hitlQueueItem.findFirst.mockResolvedValue({
+      id: "00000000-0000-0000-0000-000000000401",
+      contractId: "00000000-0000-0000-0000-000000000101",
+      originalClause: "bad clause",
+      riskReason: "high risk",
+    });
+    prismaMock.hitlQueueItem.update.mockResolvedValue({});
+    prismaMock.contract.updateMany.mockResolvedValue({ count: 1 });
+    executeMemoryAgentMock.mockResolvedValue({
+      collectionsUpdated: ["org_preferences"],
+    });
+
+    const response = await request(app)
+      .post("/api/v1/contracts/hitl/00000000-0000-0000-0000-000000000401/decision")
+      .set("x-tenant-id", "00000000-0000-0000-0000-000000000001")
+      .set("Authorization", "Bearer test")
+      .send({ decision: "reject", reviewerNotes: "Too risky" });
+
+    expect(response.status).toBe(200);
+    // Verify the updateMany call includes analysisJson
+    const updateManyCall = prismaMock.contract.updateMany.mock.calls[0][0];
+    expect(updateManyCall.data.analysisJson).toBeDefined();
+    expect(updateManyCall.data.analysisJson.decision).toBe("reject");
+    expect(updateManyCall.data.status).toBe("COMPLETED");
   });
 });

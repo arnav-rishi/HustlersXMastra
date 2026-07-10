@@ -26,6 +26,7 @@
     "openai": "^4.52.0",
     "uuid": "^10.0.0",
     "@lexguard/shared": "workspace:*",
+    "@lexguard/enkrypt": "workspace:*",
     "@lexguard/observability": "workspace:*",
     "@lexguard/qdrant": "workspace:*",
     "zod": "^3.23.0"

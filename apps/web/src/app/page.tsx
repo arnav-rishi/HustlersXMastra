@@ -28,7 +28,7 @@ export default function DashboardPage() {
       if (!response.ok) {
         return;
       }
-      const payload = await response.json();
+      const payload = (await response.json()) as { items?: DashboardContract[] };
       setRecentContracts(Array.isArray(payload.items) ? payload.items : []);
     } catch {
       // Keep dashboard usable if API is unavailable.
@@ -70,10 +70,10 @@ export default function DashboardPage() {
     }
   }, [fetchRecentContracts]);
 
-  const onDrop = useCallback(async (e: React.DragEvent) => {
+  const onDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragging(false);
-    const file = e.dataTransfer.files?.[0];
+    const file = (e.dataTransfer as DataTransfer).files?.[0];
     if (!file) return;
     await analyzeContract(file);
   }, [analyzeContract]);
@@ -130,7 +130,7 @@ export default function DashboardPage() {
             onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
             onDragLeave={() => setDragging(false)}
             onDrop={onDrop}
-            onClick={() => document.getElementById("file-input")?.click()}
+            onClick={() => (document.getElementById("file-input") as HTMLInputElement | null)?.click()}
           >
             <input
               key={fileInputKey}
@@ -138,7 +138,7 @@ export default function DashboardPage() {
               type="file"
               accept=".pdf,.docx,.doc,.txt"
               style={{ display: "none" }}
-              onChange={async (e) => {
+              onChange={async (e: React.ChangeEvent<HTMLInputElement>) => {
                 const file = e.target.files?.[0];
                 if (!file) return;
                 await analyzeContract(file);

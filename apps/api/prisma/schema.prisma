@@ -104,9 +104,10 @@ model Contract {
   // Relations
   organization Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
   uploader     User          @relation("Uploader", fields: [uploadedBy], references: [id])
-  auditLogs    AuditLog[]
-  hitlItems    HitlQueueItem[]
-  clauses      Clause[]
+  auditLogs            AuditLog[]
+  hitlItems            HitlQueueItem[]
+  clauses              Clause[]
+  workflowStageMetrics WorkflowStageMetric[]
 
   @@index([orgId])
   @@index([status])
@@ -272,4 +273,25 @@ enum DeletionStatus {
   COMPLETED
   FAILED
   PARTIAL
+}
+
+// ─── Workflow Stage Metrics ───────────────────────────────────────────────────
+// Per-step timing and status for readiness dashboarding (PRD v2.0 § 14.2)
+
+model WorkflowStageMetric {
+  id           String   @id @default(uuid()) @db.Uuid
+  contractId   String   @map("contract_id") @db.Uuid
+  workflowId   String   @map("workflow_id") @db.VarChar(64)
+  stageName    String   @map("stage_name") @db.VarChar(100)
+  // "started" | "completed" | "failed"
+  status       String   @map("status") @db.VarChar(20)
+  durationMs   Int?     @map("duration_ms")
+  errorMessage String?  @map("error_message") @db.Text
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  @@index([contractId])
+  @@index([workflowId])
+  @@map("workflow_stage_metrics")
 }

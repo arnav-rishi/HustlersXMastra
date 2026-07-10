@@ -42,14 +42,9 @@ import { createWorkflow, createStep } from "@mastra/core/workflows";
 import { z } from "zod";
 import { PrismaClient } from "@prisma/client";
 import {
-  DocumentAgentInputSchema,
   DocumentAgentOutputSchema,
-  ParsingAgentInputSchema,
   ParsingAgentOutputSchema,
-  EmbeddingAgentInputSchema,
   EmbeddingAgentOutputSchema,
-  ContractUploadRequestSchema,
-  AnalysisReportSchema,
 } from "@lexguard/shared/schemas";
 import { executeDocumentAgent } from "@lexguard/agents/document-agent";
 import { executeParsingAgent } from "@lexguard/agents/parsing-agent";
@@ -66,9 +61,59 @@ import {
   withSpan,
   OTEL_SPAN_NAMES,
 } from "@lexguard/observability/tracer";
-import { RETRY, SLA } from "@lexguard/shared/constants";
-import { recordContractAnalysisLatency } from "@lexguard/observability/metrics";
+import { RETRY } from "@lexguard/shared/constants";
 import { v4 as uuidv4 } from "uuid";
+
+// ─── Shared Prisma Instance (reused across workflow steps) ───────────────────
+
+const prisma = new PrismaClient();
+
+// ─── Workflow-Stage Metric Helper ─────────────────────────────────────────────
+//
+// Records a single row in WorkflowStageMetric before and after each step.
+// On success → status="completed" + durationMs
+// On failure → status="failed" + errorMessage; re-throws so Mastra can retry.
+
+async function recordStageMetric<T>(
+  contractId: string,
+  workflowId: string,
+  stageName: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const start = Date.now();
+  // Mark stage as started (fire-and-forget – don't block the step)
+  prisma.workflowStageMetric
+    .create({
+      data: { contractId, workflowId, stageName, status: "started" },
+    })
+    .catch((e) =>
+      console.warn(`[LexGuard][Workflow] Stage metric insert failed (${stageName}):`, e)
+    );
+
+  try {
+    const result = await fn();
+    const durationMs = Date.now() - start;
+    prisma.workflowStageMetric
+      .create({
+        data: { contractId, workflowId, stageName, status: "completed", durationMs },
+      })
+      .catch((e) =>
+        console.warn(`[LexGuard][Workflow] Stage metric update failed (${stageName}):`, e)
+      );
+    return result;
+  } catch (err) {
+    const durationMs = Date.now() - start;
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    prisma.workflowStageMetric
+      .create({
+        data: { contractId, workflowId, stageName, status: "failed", durationMs, errorMessage },
+      })
+      .catch((e) =>
+        console.warn(`[LexGuard][Workflow] Stage metric failure insert failed (${stageName}):`, e)
+      );
+    throw err; // re-throw so Mastra retry logic sees the error
+  }
+}
 
 // ─── Workflow Input/Output Schemas ────────────────────────────────────────────
 
@@ -87,6 +132,8 @@ const WorkflowInputSchema = z.object({
   // OTel context from API Gateway (W3C traceparent propagation)
   traceId: z.string(),
   spanId: z.string(),
+  // workflowId threaded through init data so steps can write metrics
+  workflowId: z.string().optional(),
 });
 
 const WorkflowOutputSchema = z.object({
@@ -111,22 +158,26 @@ const documentValidationStep = createStep({
     delay: RETRY.BASE_DELAY_MS,
     backoffMultiplier: 2,
   },
-  execute: async ({ inputData }) => {
-    return executeDocumentAgent({
-      otel: {
-        traceId: inputData.traceId,
-        spanId: inputData.spanId,
+  execute: async ({ inputData, getInitData }) => {
+    const initData = getInitData();
+    const wfId = initData.workflowId ?? "unknown";
+    return recordStageMetric(inputData.contractId, wfId, "document-validation", () =>
+      executeDocumentAgent({
+        otel: {
+          traceId: inputData.traceId,
+          spanId: inputData.spanId,
+          orgId: inputData.orgId,
+          contractId: inputData.contractId,
+        },
+        rawFileUrl: inputData.rawFileUrl,
+        fileName: inputData.fileName,
+        fileSize: inputData.fileSize,
+        mimeType: inputData.mimeType,
         orgId: inputData.orgId,
-        contractId: inputData.contractId,
-      },
-      rawFileUrl: inputData.rawFileUrl,
-      fileName: inputData.fileName,
-      fileSize: inputData.fileSize,
-      mimeType: inputData.mimeType,
-      orgId: inputData.orgId,
-      tenantId: inputData.tenantId,
-      uploadedBy: inputData.uploadedBy,
-    });
+        tenantId: inputData.tenantId,
+        uploadedBy: inputData.uploadedBy,
+      })
+    );
   },
 });
 
@@ -142,19 +193,23 @@ const parsingStep = createStep({
     delay: RETRY.BASE_DELAY_MS,
     backoffMultiplier: 2,
   },
-  execute: async ({ inputData }) => {
-    return executeParsingAgent({
-      otel: {
-        traceId: "",
-        spanId: "",
-        orgId: "",
+  execute: async ({ inputData, getInitData }) => {
+    const initData = getInitData();
+    const wfId = initData.workflowId ?? "unknown";
+    return recordStageMetric(inputData.contractId, wfId, "parsing", () =>
+      executeParsingAgent({
+        otel: {
+          traceId: initData.traceId,
+          spanId: initData.spanId,
+          orgId: initData.orgId,
+          contractId: inputData.contractId,
+        },
         contractId: inputData.contractId,
-      },
-      contractId: inputData.contractId,
-      orgId: "",  // Will be threaded through context in production
-      documentType: inputData.documentType,
-      s3Key: inputData.s3Key,
-    });
+        orgId: initData.orgId,
+        documentType: inputData.documentType,
+        s3Key: inputData.s3Key,
+      })
+    );
   },
 });
 
@@ -170,20 +225,24 @@ const embeddingStep = createStep({
     delay: RETRY.BASE_DELAY_MS,
     backoffMultiplier: 2,
   },
-  execute: async ({ inputData }) => {
-    return executeEmbeddingAgent({
-      otel: {
-        traceId: "",
-        spanId: "",
-        orgId: "",
+  execute: async ({ inputData, getInitData }) => {
+    const initData = getInitData();
+    const wfId = initData.workflowId ?? "unknown";
+    return recordStageMetric(inputData.contractId, wfId, "embedding", () =>
+      executeEmbeddingAgent({
+        otel: {
+          traceId: initData.traceId,
+          spanId: initData.spanId,
+          orgId: initData.orgId,
+          contractId: inputData.contractId,
+        },
         contractId: inputData.contractId,
-      },
-      contractId: inputData.contractId,
-      orgId: "",
-      tenantId: "",
-      jurisdiction: "Unknown",
-      clauses: inputData.clauses,
-    });
+        orgId: initData.orgId,
+        tenantId: initData.tenantId,
+        jurisdiction: initData.jurisdiction ?? "Unknown",
+        clauses: inputData.clauses,
+      })
+    );
   },
 });
 
@@ -207,44 +266,47 @@ const classificationAndRetrievalStep = createStep({
   }),
   execute: async ({ inputData, getInitData }) => {
     const initData = getInitData();
-    const classified = await executeClassificationAgent({
-      otel: {
-        traceId: initData.traceId,
-        spanId: initData.spanId,
-        orgId: initData.orgId,
-        contractId: inputData.contractId,
-      },
-      contractId: inputData.contractId,
-      orgId: initData.orgId,
-      clauses: inputData.clauses,
-    });
-
-    const retrievals = await Promise.all(
-      classified.classifiedClauses.map((clause) =>
-        executeRetrievalAgent({
-          otel: {
-            traceId: initData.traceId,
-            spanId: initData.spanId,
-            orgId: initData.orgId,
-            contractId: inputData.contractId,
-          },
-          contractId: inputData.contractId,
+    const wfId = initData.workflowId ?? "unknown";
+    return recordStageMetric(inputData.contractId, wfId, "classification-and-retrieval", async () => {
+      const classified = await executeClassificationAgent({
+        otel: {
+          traceId: initData.traceId,
+          spanId: initData.spanId,
           orgId: initData.orgId,
-          tenantId: initData.tenantId,
-          jurisdiction: initData.jurisdiction ?? "Unknown",
-          clause,
-        })
-      )
-    );
+          contractId: inputData.contractId,
+        },
+        contractId: inputData.contractId,
+        orgId: initData.orgId,
+        clauses: inputData.clauses,
+      });
 
-    return {
-      contractId: inputData.contractId,
-      clauses: classified.classifiedClauses,
-      retrievals,
-      jurisdiction: initData.jurisdiction ?? "Unknown",
-      orgId: initData.orgId,
-      tenantId: initData.tenantId,
-    };
+      const retrievals = await Promise.all(
+        classified.classifiedClauses.map((clause) =>
+          executeRetrievalAgent({
+            otel: {
+              traceId: initData.traceId,
+              spanId: initData.spanId,
+              orgId: initData.orgId,
+              contractId: inputData.contractId,
+            },
+            contractId: inputData.contractId,
+            orgId: initData.orgId,
+            tenantId: initData.tenantId,
+            jurisdiction: initData.jurisdiction ?? "Unknown",
+            clause,
+          })
+        )
+      );
+
+      return {
+        contractId: inputData.contractId,
+        clauses: classified.classifiedClauses,
+        retrievals,
+        jurisdiction: initData.jurisdiction ?? "Unknown",
+        orgId: initData.orgId,
+        tenantId: initData.tenantId,
+      };
+    });
   },
 });
 
@@ -271,48 +333,52 @@ const riskAndBenchmarkStep = createStep({
     orgId: z.string().uuid(),
     tenantId: z.string().uuid(),
   }),
-  execute: async ({ inputData }) => {
-    const riskResults = await Promise.all(
-      inputData.clauses.map((clause: any, index: number) =>
-        executeRiskAgent({
-          otel: {
-            traceId: "workflow",
-            spanId: "workflow",
-            orgId: inputData.orgId,
+  execute: async ({ inputData, getInitData }) => {
+    const initData = getInitData();
+    const wfId = initData.workflowId ?? "unknown";
+    return recordStageMetric(inputData.contractId, wfId, "risk-and-benchmark", async () => {
+      const riskResults = await Promise.all(
+        inputData.clauses.map((clause: any, index: number) =>
+          executeRiskAgent({
+            otel: {
+              traceId: "workflow",
+              spanId: "workflow",
+              orgId: inputData.orgId,
+              contractId: inputData.contractId,
+            },
             contractId: inputData.contractId,
-          },
-          contractId: inputData.contractId,
-          orgId: inputData.orgId,
-          jurisdiction: inputData.jurisdiction,
-          clause,
-          retrievedContext: inputData.retrievals[index],
-        })
-      )
-    );
-    const benchmarkResults = await Promise.all(
-      inputData.clauses.map((clause: any, index: number) =>
-        executeBenchmarkAgent({
-          contractId: inputData.contractId,
-          orgId: inputData.orgId,
-          jurisdiction: inputData.jurisdiction,
-          clauseIndex: clause.clauseIndex,
-          clauseType: clause.clauseType ?? "unknown",
-          clauseText: clause.clauseText,
-          retrievedTemplates: inputData.retrievals[index]?.retrievedItems ?? [],
-          retrievedPrecedents: inputData.retrievals[index]?.retrievedItems ?? [],
-        })
-      )
-    );
-    return {
-      contractId: inputData.contractId,
-      riskResults,
-      benchmarkResults,
-      clauses: inputData.clauses,
-      retrievals: inputData.retrievals,
-      jurisdiction: inputData.jurisdiction,
-      orgId: inputData.orgId,
-      tenantId: inputData.tenantId,
-    };
+            orgId: inputData.orgId,
+            jurisdiction: inputData.jurisdiction,
+            clause,
+            retrievedContext: inputData.retrievals[index],
+          })
+        )
+      );
+      const benchmarkResults = await Promise.all(
+        inputData.clauses.map((clause: any, index: number) =>
+          executeBenchmarkAgent({
+            contractId: inputData.contractId,
+            orgId: inputData.orgId,
+            jurisdiction: inputData.jurisdiction,
+            clauseIndex: clause.clauseIndex,
+            clauseType: clause.clauseType ?? "unknown",
+            clauseText: clause.clauseText,
+            retrievedTemplates: inputData.retrievals[index]?.retrievedItems ?? [],
+            retrievedPrecedents: inputData.retrievals[index]?.retrievedItems ?? [],
+          })
+        )
+      );
+      return {
+        contractId: inputData.contractId,
+        riskResults,
+        benchmarkResults,
+        clauses: inputData.clauses,
+        retrievals: inputData.retrievals,
+        jurisdiction: inputData.jurisdiction,
+        orgId: inputData.orgId,
+        tenantId: inputData.tenantId,
+      };
+    });
   },
 });
 
@@ -342,39 +408,43 @@ const rewriteStep = createStep({
     orgId: z.string().uuid(),
     tenantId: z.string().uuid(),
   }),
-  execute: async ({ inputData }) => {
-    const rewriteResults = await Promise.all(
-      inputData.clauses.map((clause: any, index: number) =>
-        executeRewriteAgent({
-          otel: {
-            traceId: "workflow",
-            spanId: "workflow",
-            orgId: inputData.orgId,
+  execute: async ({ inputData, getInitData }) => {
+    const initData = getInitData();
+    const wfId = initData.workflowId ?? "unknown";
+    return recordStageMetric(inputData.contractId, wfId, "rewrite", async () => {
+      const rewriteResults = await Promise.all(
+        inputData.clauses.map((clause: any, index: number) =>
+          executeRewriteAgent({
+            otel: {
+              traceId: "workflow",
+              spanId: "workflow",
+              orgId: inputData.orgId,
+              contractId: inputData.contractId,
+            },
             contractId: inputData.contractId,
-          },
-          contractId: inputData.contractId,
-          orgId: inputData.orgId,
-          jurisdiction: inputData.jurisdiction,
-          clause,
-          riskReport: inputData.riskResults[index]?.riskReports?.[0],
-          orgPreferences:
-            inputData.retrievals[index]?.retrievedItems?.filter(
-              (item: any) => item.collection === "org_preferences"
-            ) ?? [],
-        })
-      )
-    );
-    return {
-      contractId: inputData.contractId,
-      rewriteResults,
-      riskResults: inputData.riskResults,
-      benchmarkResults: inputData.benchmarkResults,
-      clauses: inputData.clauses,
-      retrievals: inputData.retrievals,
-      jurisdiction: inputData.jurisdiction,
-      orgId: inputData.orgId,
-      tenantId: inputData.tenantId,
-    };
+            orgId: inputData.orgId,
+            jurisdiction: inputData.jurisdiction,
+            clause,
+            riskReport: inputData.riskResults[index]?.riskReports?.[0],
+            orgPreferences:
+              inputData.retrievals[index]?.retrievedItems?.filter(
+                (item: any) => item.collection === "org_preferences"
+              ) ?? [],
+          })
+        )
+      );
+      return {
+        contractId: inputData.contractId,
+        rewriteResults,
+        riskResults: inputData.riskResults,
+        benchmarkResults: inputData.benchmarkResults,
+        clauses: inputData.clauses,
+        retrievals: inputData.retrievals,
+        jurisdiction: inputData.jurisdiction,
+        orgId: inputData.orgId,
+        tenantId: inputData.tenantId,
+      };
+    });
   },
 });
 
@@ -406,39 +476,43 @@ const complianceStep = createStep({
     orgId: z.string().uuid(),
     tenantId: z.string().uuid(),
   }),
-  execute: async ({ inputData }) => {
-    const complianceResults = await Promise.all(
-      inputData.clauses.map((clause: any, index: number) =>
-        executeComplianceAgent({
-          contractId: inputData.contractId,
-          orgId: inputData.orgId,
-          jurisdiction: inputData.jurisdiction,
-          clauseIndex: clause.clauseIndex,
-          clauseType: clause.clauseType ?? "unknown",
-          clauseText: clause.clauseText,
-          jurisdictionRules:
-            inputData.retrievals[index]?.retrievedItems?.filter(
-              (item: any) => item.collection === "jurisdiction_rules"
-            ) ?? [],
-          regulatoryDocs:
-            inputData.retrievals[index]?.retrievedItems?.filter(
-              (item: any) => item.collection === "regulatory_documents"
-            ) ?? [],
-        })
-      )
-    );
-    return {
-      contractId: inputData.contractId,
-      complianceResults,
-      rewriteResults: inputData.rewriteResults,
-      riskResults: inputData.riskResults,
-      benchmarkResults: inputData.benchmarkResults,
-      clauses: inputData.clauses,
-      retrievals: inputData.retrievals,
-      jurisdiction: inputData.jurisdiction,
-      orgId: inputData.orgId,
-      tenantId: inputData.tenantId,
-    };
+  execute: async ({ inputData, getInitData }) => {
+    const initData = getInitData();
+    const wfId = initData.workflowId ?? "unknown";
+    return recordStageMetric(inputData.contractId, wfId, "compliance", async () => {
+      const complianceResults = await Promise.all(
+        inputData.clauses.map((clause: any, index: number) =>
+          executeComplianceAgent({
+            contractId: inputData.contractId,
+            orgId: inputData.orgId,
+            jurisdiction: inputData.jurisdiction,
+            clauseIndex: clause.clauseIndex,
+            clauseType: clause.clauseType ?? "unknown",
+            clauseText: clause.clauseText,
+            jurisdictionRules:
+              inputData.retrievals[index]?.retrievedItems?.filter(
+                (item: any) => item.collection === "jurisdiction_rules"
+              ) ?? [],
+            regulatoryDocs:
+              inputData.retrievals[index]?.retrievedItems?.filter(
+                (item: any) => item.collection === "regulatory_documents"
+              ) ?? [],
+          })
+        )
+      );
+      return {
+        contractId: inputData.contractId,
+        complianceResults,
+        rewriteResults: inputData.rewriteResults,
+        riskResults: inputData.riskResults,
+        benchmarkResults: inputData.benchmarkResults,
+        clauses: inputData.clauses,
+        retrievals: inputData.retrievals,
+        jurisdiction: inputData.jurisdiction,
+        orgId: inputData.orgId,
+        tenantId: inputData.tenantId,
+      };
+    });
   },
 });
 
@@ -473,36 +547,40 @@ const evaluationStep = createStep({
     jurisdiction: z.string(),
     orgId: z.string().uuid(),
   }),
-  execute: async ({ inputData }) => {
-    const serializedOutput = JSON.stringify({
-      riskResults: inputData.riskResults,
-      benchmarkResults: inputData.benchmarkResults,
-      rewriteResults: inputData.rewriteResults,
-      complianceResults: inputData.complianceResults,
-    });
-    const evaluation = await executeEvaluationAgent({
-      contractId: inputData.contractId,
-      orgId: inputData.orgId,
-      sessionId: inputData.contractId,
-      agentId: "contract-analysis-workflow",
-      inputText: JSON.stringify(inputData.clauses),
-      outputText: serializedOutput,
-      jurisdiction: inputData.jurisdiction,
-    });
+  execute: async ({ inputData, getInitData }) => {
+    const initData = getInitData();
+    const wfId = initData.workflowId ?? "unknown";
+    return recordStageMetric(inputData.contractId, wfId, "evaluation", async () => {
+      const serializedOutput = JSON.stringify({
+        riskResults: inputData.riskResults,
+        benchmarkResults: inputData.benchmarkResults,
+        rewriteResults: inputData.rewriteResults,
+        complianceResults: inputData.complianceResults,
+      });
+      const evaluation = await executeEvaluationAgent({
+        contractId: inputData.contractId,
+        orgId: inputData.orgId,
+        sessionId: inputData.contractId,
+        agentId: "contract-analysis-workflow",
+        inputText: JSON.stringify(inputData.clauses),
+        outputText: serializedOutput,
+        jurisdiction: inputData.jurisdiction,
+      });
 
-    return {
-      contractId: inputData.contractId,
-      enkryptPass: evaluation.overallPass,
-      confidenceScore: evaluation.confidenceScore,
-      hitlRequired: evaluation.routeToHitl,
-      hitlItemIds: evaluation.routeToHitl ? [uuidv4()] : [],
-      riskResults: inputData.riskResults,
-      benchmarkResults: inputData.benchmarkResults,
-      rewriteResults: inputData.rewriteResults,
-      complianceResults: inputData.complianceResults,
-      jurisdiction: inputData.jurisdiction,
-      orgId: inputData.orgId,
-    };
+      return {
+        contractId: inputData.contractId,
+        enkryptPass: evaluation.overallPass,
+        confidenceScore: evaluation.confidenceScore,
+        hitlRequired: evaluation.routeToHitl,
+        hitlItemIds: evaluation.routeToHitl ? [uuidv4()] : [],
+        riskResults: inputData.riskResults,
+        benchmarkResults: inputData.benchmarkResults,
+        rewriteResults: inputData.rewriteResults,
+        complianceResults: inputData.complianceResults,
+        jurisdiction: inputData.jurisdiction,
+        orgId: inputData.orgId,
+      };
+    });
   },
 });
 
@@ -539,41 +617,45 @@ const hitlGateStep = createStep({
     hitlStatus: z.record(z.string()),
   }),
   // Mastra native suspend support
-  execute: async ({ inputData, suspend }) => {
-    if (inputData.hitlRequired) {
-      // Suspend the workflow — Mastra will persist state
-      // The HITL portal calls POST /api/v1/hitl/{id}/decision to resume
-      console.log(
-        `[Workflow] HITL suspend for contract ${inputData.contractId}. Items: ${inputData.hitlItemIds.join(", ")}`
-      );
-      await suspend({
-        reason: "enkrypt_confidence_below_threshold",
-        hitlItemIds: inputData.hitlItemIds,
-        contractId: inputData.contractId,
+  execute: async ({ inputData, suspend, getInitData }) => {
+    const initData = getInitData();
+    const wfId = initData.workflowId ?? "unknown";
+    return recordStageMetric(inputData.contractId, wfId, "hitl-gate", async () => {
+      if (inputData.hitlRequired) {
+        // Suspend the workflow — Mastra will persist state
+        // The HITL portal calls POST /api/v1/hitl/{id}/decision to resume
+        console.log(
+          `[Workflow] HITL suspend for contract ${inputData.contractId}. Items: ${inputData.hitlItemIds.join(", ")}`
+        );
+        await suspend({
+          reason: "enkrypt_confidence_below_threshold",
+          hitlItemIds: inputData.hitlItemIds,
+          contractId: inputData.contractId,
+        });
+      }
+
+      const hitlStatus: Record<number, string> = {};
+      const enkryptScores: Record<number, number> = {};
+      // Simulate clause-level confidence map for reporting:
+      inputData.riskResults.forEach((_, i) => {
+        hitlStatus[i] = inputData.hitlRequired ? "pending" : "not_required";
+        enkryptScores[i] = inputData.confidenceScore;
       });
-    }
 
-    const hitlStatus: Record<number, string> = {};
-    const enkryptScores: Record<number, number> = {};
-    // Simulate clause-level confidence map for reporting:
-    inputData.riskResults.forEach((_, i) => {
-      hitlStatus[i] = inputData.hitlRequired ? "pending" : "not_required";
-      enkryptScores[i] = inputData.confidenceScore;
+      return {
+        contractId: inputData.contractId,
+        approvedForReport: inputData.enkryptPass,
+        hitlItemIds: inputData.hitlItemIds,
+        riskResults: inputData.riskResults,
+        benchmarkResults: inputData.benchmarkResults,
+        rewriteResults: inputData.rewriteResults,
+        complianceResults: inputData.complianceResults,
+        jurisdiction: inputData.jurisdiction,
+        orgId: inputData.orgId,
+        enkryptConfidenceScores: enkryptScores,
+        hitlStatus: hitlStatus,
+      };
     });
-
-    return {
-      contractId: inputData.contractId,
-      approvedForReport: inputData.enkryptPass,
-      hitlItemIds: inputData.hitlItemIds,
-      riskResults: inputData.riskResults,
-      benchmarkResults: inputData.benchmarkResults,
-      rewriteResults: inputData.rewriteResults,
-      complianceResults: inputData.complianceResults,
-      jurisdiction: inputData.jurisdiction,
-      orgId: inputData.orgId,
-      enkryptConfidenceScores: enkryptScores,
-      hitlStatus: hitlStatus,
-    };
   },
 });
 
@@ -600,37 +682,41 @@ const reportingStep = createStep({
     reportId: z.string().uuid(),
     status: z.literal("completed"),
   }),
-  execute: async ({ inputData }) => {
-    const report = await executeReportingAgent({
-      contractId: inputData.contractId,
-      orgId: inputData.orgId,
-      jurisdiction: inputData.jurisdiction,
-      riskResults: inputData.riskResults,
-      benchmarkResults: inputData.benchmarkResults,
-      rewriteResults: inputData.rewriteResults,
-      complianceResults: inputData.complianceResults,
-      enkryptConfidenceScores: inputData.enkryptConfidenceScores,
-      hitlStatus: inputData.hitlStatus as any,
-    });
+  execute: async ({ inputData, getInitData }) => {
+    const initData = getInitData();
+    const wfId = initData.workflowId ?? "unknown";
+    return recordStageMetric(inputData.contractId, wfId, "reporting", async () => {
+      const report = await executeReportingAgent({
+        contractId: inputData.contractId,
+        orgId: inputData.orgId,
+        jurisdiction: inputData.jurisdiction,
+        riskResults: inputData.riskResults,
+        benchmarkResults: inputData.benchmarkResults,
+        rewriteResults: inputData.rewriteResults,
+        complianceResults: inputData.complianceResults,
+        enkryptConfidenceScores: inputData.enkryptConfidenceScores,
+        hitlStatus: inputData.hitlStatus as any,
+      });
 
-    const prisma = new PrismaClient();
-    await prisma.contract.update({
-      where: { id: inputData.contractId },
-      data: {
-        analysisJson: report as any,
+      await prisma.contract.update({
+        where: { id: inputData.contractId },
+        data: {
+          analysisJson: report as any,
+          reportId: report.reportId,
+          status: "COMPLETED",
+          workflowStatus: "completed",
+          workflowStep: "reporting",
+          completedAt: new Date(),
+          progressPct: 100,
+        },
+      });
+
+      return {
+        contractId: inputData.contractId,
         reportId: report.reportId,
-        status: "COMPLETED",
-        workflowStatus: "completed",
-        completedAt: new Date(),
-        progressPct: 100,
-      },
+        status: "completed" as const,
+      };
     });
-
-    return {
-      contractId: inputData.contractId,
-      reportId: report.reportId,
-      status: "completed" as const,
-    };
   },
 });
 
@@ -681,12 +767,15 @@ export interface TriggerContractAnalysisParams {
 /**
  * Trigger the contract analysis workflow from the API Gateway.
  * Returns immediately with workflowId for status polling.
+ *
+ * Failure boundary: if the async workflow throws after the 202 response has
+ * already been sent, we catch the error here and persist a FAILED status +
+ * audit log entry so the contract is never silently stuck in PROCESSING.
  */
 export async function triggerContractAnalysis(
   params: TriggerContractAnalysisParams
 ): Promise<{ workflowId: string; contractId: string }> {
   const workflowId = uuidv4();
-  const startTime = Date.now();
 
   return withSpan(
     OTEL_SPAN_NAMES.MASTRA_WORKFLOW_START,
@@ -699,13 +788,52 @@ export async function triggerContractAnalysis(
         .getWorkflow("contract-analysis")
         .createRun({ runId: workflowId });
 
-      void run.start({
-        inputData: {
-          ...params,
-          jurisdiction: params.jurisdiction ?? "Unknown",
-          priority: params.priority ?? "standard",
-        },
-      });
+      // Fire-and-forget: run starts async; the caller gets the 202 immediately.
+      // The .catch() is the failure boundary: if the workflow pipeline throws
+      // an unrecoverable error we persist FAILED so polling clients can detect it.
+      run
+        .start({
+          inputData: {
+            ...params,
+            jurisdiction: params.jurisdiction ?? "Unknown",
+            priority: params.priority ?? "standard",
+            workflowId,
+          },
+        })
+        .catch(async (err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(
+            `[LexGuard][Workflow] Unrecoverable workflow failure for contract ${params.contractId}:`,
+            message
+          );
+          // Persist FAILED status so the contract is not stuck in PROCESSING
+          try {
+            await prisma.contract.update({
+              where: { id: params.contractId },
+              data: {
+                status: "FAILED",
+                workflowStatus: "failed",
+                progressPct: 0,
+              },
+            });
+            await prisma.auditLog.create({
+              data: {
+                traceId: params.traceId ?? workflowId.replace(/-/g, ""),
+                spanId: workflowId.replace(/-/g, "").slice(0, 16),
+                orgId: params.orgId,
+                contractId: params.contractId,
+                agentId: "workflow-runtime",
+                eventType: "contract_analysis_failed",
+                payload: { workflowId, errorMessage: message } as any,
+              },
+            });
+          } catch (persistErr) {
+            console.error(
+              "[LexGuard][Workflow] Could not persist FAILED status:",
+              persistErr
+            );
+          }
+        });
 
       span.setAttribute("mastra.workflow_id", workflowId);
       return { workflowId, contractId: params.contractId };

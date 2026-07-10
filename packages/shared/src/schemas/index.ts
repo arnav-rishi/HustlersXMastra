@@ -103,6 +103,10 @@ export const ParsingAgentOutputSchema = z.object({
 export type ParsingAgentInput = z.infer<typeof ParsingAgentInputSchema>;
 export type ParsingAgentOutput = z.infer<typeof ParsingAgentOutputSchema>;
 
+// Convenience type aliases used by agent implementations
+export type ExtractedClause = z.infer<typeof ExtractedClauseSchema>;
+
+
 // ─── Embedding Agent ──────────────────────────────────────────────────────────
 
 export const EmbeddingAgentInputSchema = z.object({
@@ -393,3 +397,12 @@ export type ContractUploadRequest = z.infer<typeof ContractUploadRequestSchema>;
 export type ContractUploadResponse = z.infer<typeof ContractUploadResponseSchema>;
 export type QARequest = z.infer<typeof QARequestSchema>;
 export type QAResponse = z.infer<typeof QAResponseSchema>;
+
+// ─── Additional Named Type Aliases ────────────────────────────────────────────
+// These are used directly by agent implementations via `import type { X }`.
+
+export type ClassifiedClause = z.infer<typeof ClassifiedClauseSchema>;
+export type RetrievedItem = z.infer<typeof RetrievedItemSchema>;
+export type RiskReport = z.infer<typeof RiskReportSchema>;
+export type RewriteVersion = z.infer<typeof RewriteVersionSchema>;
+export type RiskSeverity = z.infer<typeof RiskSeveritySchema>;

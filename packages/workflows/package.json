@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@mastra/core": "^0.10.0",
+    "@prisma/client": "^5.15.0",
     "uuid": "^10.0.0",
     "@lexguard/shared": "workspace:*",
     "@lexguard/agents": "workspace:*",
