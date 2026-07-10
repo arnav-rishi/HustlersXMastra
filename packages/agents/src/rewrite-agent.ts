@@ -38,21 +38,21 @@ const generateRewritesTool = createTool({
     latencyMs: z.number(),
     fallbackMode: z.boolean(),
   }),
-  execute: async ({ context }) => {
+  execute: async (input, context) => {
     const env = getEnv();
     const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
 
     const systemPrompt = `ROLE: Expert Legal Draftsman.
-Generate exactly 3 clause rewrites for a ${context.clauseType} flagged as ${context.riskLevel} risk.
-Jurisdiction: ${context.jurisdiction}. Org Preferences: ${context.orgPreferences || "Standard terms"}.
-Risk: ${context.riskSummary}
+  Generate exactly 3 clause rewrites for a ${input.clauseType} flagged as ${input.riskLevel} risk.
+  Jurisdiction: ${input.jurisdiction}. Org Preferences: ${input.orgPreferences || "Standard terms"}.
+  Risk: ${input.riskSummary}
 
-RULES: Prefer mutual indemnification. Cap liability at 2x ACV. Add notice periods.
-Chain-of-Thought per rewrite: (1) identify risk language (2) pick strategy (3) draft (4) verify intent (5) confirm org alignment.
+  RULES: Prefer mutual indemnification. Cap liability at 2x ACV. Add notice periods.
+  Chain-of-Thought per rewrite: (1) identify risk language (2) pick strategy (3) draft (4) verify intent (5) confirm org alignment.
 
-CLAUSE: ${context.clauseText}
+  CLAUSE: ${input.clauseText}
 
-Return JSON: {"rewrites":[{"version":1,"strategy":"...","text":"...","changes":[{"original":"...","revised":"...","reason":"..."}]},{"version":2,...},{"version":3,...}]}`;
+  Return JSON: {"rewrites":[{"version":1,"strategy":"...","text":"...","changes":[{"original":"...","revised":"...","reason":"..."}]},{"version":2,...},{"version":3,...}]}`;
 
     const promptHash = crypto.createHash("sha256").update(systemPrompt).digest("hex");
     const start = Date.now();
@@ -66,9 +66,9 @@ Return JSON: {"rewrites":[{"version":1,"strategy":"...","text":"...","changes":[
         temperature: 0.3,
         response_format: { type: "json_object" },
         messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: `Generate rewrites for clause index ${context.clauseIndex}.` },
-        ],
+            { role: "system", content: systemPrompt },
+            { role: "user", content: `Generate rewrites for clause index ${input.clauseIndex}.` },
+          ],
       });
       inputTokens = response.usage?.prompt_tokens ?? 0;
       outputTokens = response.usage?.completion_tokens ?? 0;
@@ -79,18 +79,19 @@ Return JSON: {"rewrites":[{"version":1,"strategy":"...","text":"...","changes":[
       fallbackMode = true;
       rewrites = [{
         version: 1, strategy: "Conservative Cap",
-        text: `${context.clauseText.slice(0, 200)} [LIABILITY CAPPED AT 2x ACV — manual review required]`,
+        text: `${input.clauseText.slice(0, 200)} [LIABILITY CAPPED AT 2x ACV — manual review required]`,
         changes: [{ original: "original", revised: "capped version", reason: "Risk mitigation — fallback" }],
       }];
     }
 
     const latencyMs = Date.now() - start;
-    recordLlmTokens(context.orgId, LLM_MODELS.GPT4O_MINI, inputTokens, outputTokens);
+    recordLlmTokens(input.orgId, LLM_MODELS.GPT4O_MINI, inputTokens, outputTokens);
     return { rewrites: rewrites.map((r: any, i: number) => ({ ...r, version: r.version ?? i + 1, enkryptValidated: false })), promptHash, modelVersion: LLM_MODELS.GPT4O_MINI, inputTokens, outputTokens, latencyMs, fallbackMode };
   },
 });
 
-export const rewriteAgent = new Agent({
+export const rewriteAgent: Agent = new Agent({
+  id: "rewrite-agent",
   name: "rewrite-agent",
   instructions: "Generate exactly 3 legally-sound clause rewrites using generate_clause_rewrites. Prefer mutual indemnification. Cap liability at 2x ACV. Add notice periods. Chain-of-thought per rewrite is mandatory.",
   model: gpt4oMini,
@@ -105,15 +106,16 @@ export async function executeRewriteAgent(input: RewriteAgentInput): Promise<Rew
     const orgPreferences = input.orgPreferences.map((p) => JSON.stringify(p.payload).slice(0, 150)).join("\n");
     const riskSummary = input.riskReport.risks.map((r: any) => `${r.severity}: ${r.description}`).join("; ");
 
-    const result = await generateRewritesTool.execute({
-      context: {
-        clauseType: input.clause.clauseType ?? "unknown",
-        clauseIndex: input.clause.clauseIndex,
-        clauseText: input.clause.clauseText,
-        riskLevel: input.riskReport.overallRisk,
-        riskSummary, jurisdiction: input.jurisdiction, orgId: input.orgId, orgPreferences,
-      },
-    } as any);
+    const result = (await generateRewritesTool.execute?.({
+      clauseType: input.clause.clauseType ?? "unknown",
+      clauseIndex: input.clause.clauseIndex,
+      clauseText: input.clause.clauseText,
+      riskLevel: input.riskReport.overallRisk,
+      riskSummary,
+      jurisdiction: input.jurisdiction,
+      orgId: input.orgId,
+      orgPreferences,
+    }, {} as any)) as any || {};
 
     span.setAttribute("llm.prompt_hash_sha256", result.promptHash);
     span.setAttribute("llm.input_tokens", result.inputTokens);
@@ -121,6 +123,6 @@ export async function executeRewriteAgent(input: RewriteAgentInput): Promise<Rew
     span.setAttribute("llm.latency_ms", result.latencyMs);
     span.setAttribute("rewrite.fallback_mode", result.fallbackMode);
 
-    return { clauseIndex: input.clause.clauseIndex, rewrites: result.rewrites as RewriteVersion[], rewriteLatencyMs: result.latencyMs, modelVersion: result.modelVersion, promptHash: result.promptHash };
+    return { clauseIndex: input.clause.clauseIndex, rewrites: result.rewrites as RewriteVersion[] ?? [], rewriteLatencyMs: result.latencyMs ?? 0, modelVersion: result.modelVersion, promptHash: result.promptHash };
   });
 }

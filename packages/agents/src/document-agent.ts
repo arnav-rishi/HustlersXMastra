@@ -53,8 +53,8 @@ const validateFileTool = createTool({
     documentType: z.enum(["digital_pdf", "scanned_pdf", "docx"]),
     errors: z.array(z.string()),
   }),
-  execute: async ({ context }) => {
-    const { fileUrl, fileName, fileSize, mimeType } = context;
+  execute: async (input, context) => {
+    const { fileUrl, fileName, fileSize, mimeType } = input;
 
     const errors: string[] = [];
     const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
@@ -107,8 +107,8 @@ const extractMetadataTool = createTool({
     contractTitle: z.string().optional(),
     pageCount: z.number().optional(),
   }),
-  execute: async ({ context }) => {
-    const { contractText, fileName } = context;
+  execute: async (input, context) => {
+    const { contractText, fileName } = input;
     const title = fileName.replace(/\.[^.]+$/, "").replace(/[-_]/g, " ");
 
     const prompt = `Extract structured metadata from this contract excerpt. Return ONLY valid JSON.
@@ -156,8 +156,8 @@ const storeToS3Tool = createTool({
     s3Key: z.string(),
     checksumSha256: z.string(),
   }),
-  execute: async ({ context }) => {
-    const { contractId, orgId, fileName } = context;
+  execute: async (input, context) => {
+    const { contractId, orgId, fileName } = input;
 
     // S3 key format: {orgId}/contracts/{contractId}/{fileName}
     const s3Key = `${orgId}/contracts/${contractId}/${fileName}`;
@@ -184,7 +184,8 @@ const storeToS3Tool = createTool({
 
 // ─── Agent Definition ─────────────────────────────────────────────────────────
 
-export const documentAgent = new Agent({
+export const documentAgent: Agent = new Agent({
+  id: "document-agent",
   name: "document-agent",
   instructions: `You are the Document Agent in the LexGuard AI legal intelligence platform.
 
@@ -246,8 +247,10 @@ export async function executeDocumentAgent(
         2. If valid, call store_to_s3 to persist the raw file
         3. Return a structured summary of the document`,
         {
-          threadId: contractId,
-          resourceId: input.orgId,
+          memory: {
+            thread: contractId,
+            resource: input.orgId,
+          },
         }
       );
 

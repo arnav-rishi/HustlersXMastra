@@ -139,18 +139,18 @@ const analyzeClauseRiskTool = createTool({
     latencyMs: z.number(),
     hasUncertainty: z.boolean(),
   }),
-  execute: async ({ context }) => {
+  execute: async (input, context) => {
     const env = getEnv();
     const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
 
     const systemPrompt = buildRiskAnalysisPrompt({
-      clauseType: context.clauseType,
-      jurisdiction: context.jurisdiction,
-      orgName: `Org-${context.orgId.slice(0, 8)}`,
-      retrievedRisks: context.retrievedContext,
-      benchmarkSummary: context.benchmarkContext || "No benchmark data available",
+      clauseType: input.clauseType,
+      jurisdiction: input.jurisdiction,
+      orgName: `Org-${input.orgId.slice(0, 8)}`,
+      retrievedRisks: input.retrievedContext,
+      benchmarkSummary: input.benchmarkContext || "No benchmark data available",
       industrySector: "Commercial",
-      clauseText: context.clauseText,
+      clauseText: input.clauseText,
     });
 
     // SHA-256 hash of prompt for audit log (per PRD LG-COMP-002)
@@ -175,7 +175,7 @@ const analyzeClauseRiskTool = createTool({
           { role: "system", content: systemPrompt },
           {
             role: "user",
-            content: `Analyze the clause above (clauseIndex: ${context.clauseIndex}) and return the risk report JSON.`,
+            content: `Analyze the clause above (clauseIndex: ${input.clauseIndex}) and return the risk report JSON.`,
           },
         ],
       });
@@ -185,7 +185,7 @@ const analyzeClauseRiskTool = createTool({
 
       const content = response.choices[0]?.message?.content ?? "{}";
       riskReport = JSON.parse(content);
-      riskReport.clauseIndex = context.clauseIndex;
+      riskReport.clauseIndex = input.clauseIndex;
       riskReport.promptHash = promptHash;
       riskReport.modelVersion = LLM_MODELS.GPT4O;
 
@@ -193,12 +193,12 @@ const analyzeClauseRiskTool = createTool({
       hasUncertainty = true;
       // Return safe partial result on failure (per PRD failure behavior)
       riskReport = {
-        clauseType: context.clauseType,
-        clauseIndex: context.clauseIndex,
+        clauseType: input.clauseType,
+        clauseIndex: input.clauseIndex,
         risks: [{
           severity: RISK_SEVERITY.MODERATE,
           description: "Risk analysis incomplete — LLM service error",
-          triggeringLanguage: context.clauseText.slice(0, 100),
+          triggeringLanguage: input.clauseText.slice(0, 100),
           financialExposure: "Unknown — manual review required",
           citation: "Unverified",
         }],
@@ -212,7 +212,7 @@ const analyzeClauseRiskTool = createTool({
     const latencyMs = Date.now() - start;
 
     // Record LLM token usage for cost tracking
-    recordLlmTokens(context.orgId, LLM_MODELS.GPT4O, inputTokens, outputTokens);
+    recordLlmTokens(input.orgId, LLM_MODELS.GPT4O, inputTokens, outputTokens);
 
     return {
       riskReport,
@@ -228,7 +228,8 @@ const analyzeClauseRiskTool = createTool({
 
 // ─── Agent Definition ─────────────────────────────────────────────────────────
 
-export const riskAgent = new Agent({
+export const riskAgent: Agent = new Agent({
+  id: "risk-analysis-agent",
   name: "risk-analysis-agent",
   instructions: `You are the Risk Analysis Agent in the LexGuard AI legal intelligence platform.
 
@@ -273,20 +274,18 @@ export async function executeRiskAgent(
         .map((item) => `[${item.collection}] score:${item.score.toFixed(2)} — ${JSON.stringify(item.payload).slice(0, 300)}`)
         .join("\n");
 
-      const result = await analyzeClauseRiskTool.execute({
-        context: {
-          clauseType: input.clause.clauseType ?? "unknown",
-          clauseIndex: input.clause.clauseIndex,
-          clauseText: input.clause.clauseText,
-          jurisdiction: input.jurisdiction,
-          orgId: input.orgId,
-          retrievedContext,
-          benchmarkContext: "",
-        },
-      } as any);
+      const result = (await analyzeClauseRiskTool.execute?.({
+        clauseType: input.clause.clauseType ?? "unknown",
+        clauseIndex: input.clause.clauseIndex,
+        clauseText: input.clause.clauseText,
+        jurisdiction: input.jurisdiction,
+        orgId: input.orgId,
+        retrievedContext,
+        benchmarkContext: "",
+      }, {} as any)) as any || {};
 
       const riskReport: RiskReport = {
-        ...result.riskReport,
+        ...(result.riskReport || {}),
         latencyMs: result.latencyMs,
       };
 
@@ -304,7 +303,7 @@ export async function executeRiskAgent(
       span.setAttribute("risk.critical_count", criticalCount);
       span.setAttribute("risk.has_uncertainty", result.hasUncertainty);
 
-      if (result.latencyMs > 10_000) {
+      if ((result.latencyMs ?? 0) > 10_000) {
         console.warn(`[RiskAgent] GPT-4o latency ${result.latencyMs}ms exceeds 10s alert threshold`);
       }
 

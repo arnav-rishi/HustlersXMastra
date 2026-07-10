@@ -40,15 +40,15 @@ const retrieveClauseContextTool = createTool({
   description: "Retrieves the most relevant clauses + conversation history from Qdrant for Q&A grounding.",
   inputSchema: z.object({ contractId: z.string().uuid(), orgId: z.string().uuid(), sessionId: z.string().uuid(), question: z.string(), jurisdiction: z.string().optional() }),
   outputSchema: z.object({ clauses: z.array(z.any()), conversationHistory: z.array(z.any()), contextText: z.string() }),
-  execute: async ({ context }) => {
+  execute: async (input, context) => {
     const qdrant = getQdrantClient();
-    const vector = await embedText(context.question);
+    const vector = await embedText(input.question);
     const [clauseResults, historyResults] = await Promise.all([
       qdrant.denseSearch(QDRANT_COLLECTIONS.CONTRACTS, vector,
-        { must: [{ key: "contract_id", match: { value: context.contractId } }, { key: "org_id", match: { value: context.orgId } }] },
+        { must: [{ key: "contract_id", match: { value: input.contractId } }, { key: "org_id", match: { value: input.orgId } }] },
         RETRIEVAL_TOP_K, RETRIEVAL_MIN_SCORE),
       qdrant.denseSearch(QDRANT_COLLECTIONS.CONVERSATION_MEMORY, vector,
-        { must: [{ key: "session_id", match: { value: context.sessionId } }] },
+        { must: [{ key: "session_id", match: { value: input.sessionId } }] },
         5, 0.5),
     ]);
     const contextText = [
@@ -66,20 +66,20 @@ const answerQuestionTool = createTool({
   description: "Generates a grounded, plain-language answer to a legal question using retrieved contract context.",
   inputSchema: z.object({ question: z.string(), contextText: z.string(), jurisdiction: z.string().optional(), orgId: z.string() }),
   outputSchema: z.object({ answer: z.string(), citations: z.array(z.string()), promptHash: z.string(), inputTokens: z.number(), outputTokens: z.number() }),
-  execute: async ({ context }) => {
+  execute: async (input, context) => {
     const env = getEnv();
     const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
     const prompt = `You are a Senior Legal Analyst answering questions about a contract.
-Answer in plain English (Flesch-Kincaid readability > 60). Cite the specific clause.
-Do NOT give definitive legal advice — provide analysis and recommend consulting a qualified attorney.
-Jurisdiction: ${context.jurisdiction ?? "Unknown"}.
+  Answer in plain English (Flesch-Kincaid readability > 60). Cite the specific clause.
+  Do NOT give definitive legal advice — provide analysis and recommend consulting a qualified attorney.
+  Jurisdiction: ${input.jurisdiction ?? "Unknown"}.
 
-CONTEXT:
-${context.contextText}
+  CONTEXT:
+  ${input.contextText}
 
-QUESTION: ${context.question}
+  QUESTION: ${input.question}
 
-Return JSON: {"answer":"...","citations":["clause text excerpt...", "..."]}`;
+  Return JSON: {"answer":"...","citations":["clause text excerpt...", "..."]}`;
     const promptHash = crypto.createHash("sha256").update(prompt).digest("hex");
     let answer = ""; let citations: string[] = []; let inputTokens = 0, outputTokens = 0;
     try {
@@ -92,7 +92,7 @@ Return JSON: {"answer":"...","citations":["clause text excerpt...", "..."]}`;
       const parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
       answer = parsed.answer ?? "Unable to generate answer.";
       citations = Array.isArray(parsed.citations) ? parsed.citations : [];
-      recordLlmTokens(context.orgId, LLM_MODELS.GPT4O, inputTokens, outputTokens);
+      recordLlmTokens(input.orgId, LLM_MODELS.GPT4O, inputTokens, outputTokens);
     } catch { answer = "Analysis temporarily unavailable. Please try again."; }
     return { answer, citations, promptHash, inputTokens, outputTokens };
   },
@@ -103,15 +103,15 @@ const storeConversationTurnTool = createTool({
   description: "Persists a Q&A turn into the Qdrant conversation_memory collection (30-day TTL).",
   inputSchema: z.object({ sessionId: z.string().uuid(), orgId: z.string().uuid(), userId: z.string().uuid(), turnIndex: z.number(), role: z.enum(["user", "assistant"]), text: z.string(), contractId: z.string().uuid() }),
   outputSchema: z.object({ stored: z.boolean() }),
-  execute: async ({ context }) => {
+  execute: async (input, context) => {
     const qdrant = getQdrantClient();
-    const vector = await embedText(context.text);
+    const vector = await embedText(input.text);
     await qdrant.upsertPoints(QDRANT_COLLECTIONS.CONVERSATION_MEMORY, [{
       id: uuidv4(), vector,
       payload: {
-        session_id: context.sessionId, org_id: context.orgId, user_id: context.userId,
-        turn_index: context.turnIndex, message_role: context.role, message_text: context.text,
-        linked_contract_id: context.contractId, timestamp: new Date().toISOString(),
+        session_id: input.sessionId, org_id: input.orgId, user_id: input.userId,
+        turn_index: input.turnIndex, message_role: input.role, message_text: input.text,
+        linked_contract_id: input.contractId, timestamp: new Date().toISOString(),
         ttl_days: TTL.CONVERSATION_MEMORY_DAYS,
       },
     }]);
@@ -119,7 +119,8 @@ const storeConversationTurnTool = createTool({
   },
 });
 
-export const qaAgent = new Agent({
+export const qaAgent: Agent = new Agent({
+  id: "qa-agent",
   name: "qa-agent",
   instructions: `You are the Legal Q&A Agent. Answer contract questions in plain English (FK > 60).
 Steps: (1) retrieve_clause_context (2) answer_legal_question (3) store_conversation_turn for both user Q and your A.
@@ -138,13 +139,13 @@ export async function executeQAAgent(request: QARequest & { userId: string; juri
     const turnIndex = request.turnIndex ?? 0;
 
     // 1. Retrieve context
-    const ctx = await retrieveClauseContextTool.execute({ context: { contractId: request.contractId, orgId: request.orgId, sessionId, question: request.question, jurisdiction: request.jurisdiction } } as any);
+    const ctx = (await retrieveClauseContextTool.execute?.({ contractId: request.contractId, orgId: request.orgId, sessionId, question: request.question, jurisdiction: request.jurisdiction }, {} as any)) as any || { contextText: "" };
 
     // 2. Store user turn
-    await storeConversationTurnTool.execute({ context: { sessionId, orgId: request.orgId, userId: request.userId, turnIndex, role: "user" as const, text: request.question, contractId: request.contractId } } as any);
+    await storeConversationTurnTool.execute?.({ sessionId, orgId: request.orgId, userId: request.userId, turnIndex, role: "user" as const, text: request.question, contractId: request.contractId }, {} as any);
 
     // 3. Generate answer
-    const qa = await answerQuestionTool.execute({ context: { question: request.question, contextText: ctx.contextText, jurisdiction: request.jurisdiction, orgId: request.orgId } } as any);
+    const qa = (await answerQuestionTool.execute?.({ question: request.question, contextText: ctx.contextText, jurisdiction: request.jurisdiction, orgId: request.orgId }, {} as any)) as any || { answer: "", citations: [] };
 
     // 4. Run Enkrypt validation
     const enkrypt = await runEnkryptPipeline({ sessionId, agentId: "qa-agent", inputText: request.question, outputText: qa.answer, retrievedContext: ctx.contextText, orgId: request.orgId, jurisdiction: request.jurisdiction });
@@ -153,7 +154,7 @@ export async function executeQAAgent(request: QARequest & { userId: string; juri
 
     // 5. Store assistant turn (only if Enkrypt passes)
     if (!requiresHitl) {
-      await storeConversationTurnTool.execute({ context: { sessionId, orgId: request.orgId, userId: request.userId, turnIndex: turnIndex + 1, role: "assistant" as const, text: enkrypt.safeOutput ?? qa.answer, contractId: request.contractId } } as any);
+      await storeConversationTurnTool.execute?.({ sessionId, orgId: request.orgId, userId: request.userId, turnIndex: turnIndex + 1, role: "assistant" as const, text: enkrypt.safeOutput ?? qa.answer, contractId: request.contractId }, {} as any);
     }
 
     span.setAttribute("qa.enkrypt_pass", enkrypt.overallPass);

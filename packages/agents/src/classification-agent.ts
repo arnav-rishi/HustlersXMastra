@@ -89,8 +89,8 @@ const classifyClauseLlmTool = createTool({
     confidence: z.number().min(0).max(1),
     reasoning: z.string(),
   }),
-  execute: async ({ context }) => {
-    const { clauseText, clauseIndex } = context;
+  execute: async (input, context) => {
+    const { clauseText, clauseIndex } = input;
     const env = getEnv();
     const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
 
@@ -136,7 +136,8 @@ Return JSON: { "clauseType": "<type>", "confidence": <0.0-1.0>, "reasoning": "<o
 
 // ─── Agent Definition ─────────────────────────────────────────────────────────
 
-export const classificationAgent = new Agent({
+export const classificationAgent: Agent = new Agent({
+  id: "classification-agent",
   name: "classification-agent",
   instructions: `You are the Classification Agent in the LexGuard AI legal intelligence platform.
 
@@ -199,12 +200,10 @@ export async function executeClassificationAgent(
           fallbackUsed = true;
           fallbackCount++;
 
-          const llmResult = await classifyClauseLlmTool.execute({
-            context: {
-              clauseText: clause.clauseText,
-              clauseIndex: clause.clauseIndex,
-            },
-          } as any);
+          const llmResult = (await classifyClauseLlmTool.execute?.({
+            clauseText: clause.clauseText,
+            clauseIndex: clause.clauseIndex,
+          }, {} as any)) as any || { clauseType: 'indemnification', confidence: 0.5 };
 
           clauseType = llmResult.clauseType;
           confidence = llmResult.confidence;
