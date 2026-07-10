@@ -61,7 +61,6 @@ import {
   withSpan,
   OTEL_SPAN_NAMES,
 } from "@lexguard/observability/tracer";
-import { RETRY } from "@lexguard/shared/constants";
 import { v4 as uuidv4 } from "uuid";
 
 // ─── Shared Prisma Instance (reused across workflow steps) ───────────────────
@@ -153,11 +152,6 @@ const documentValidationStep = createStep({
   description: "Validate the uploaded contract file, extract metadata, store to S3",
   inputSchema: WorkflowInputSchema,
   outputSchema: DocumentAgentOutputSchema,
-  retryConfig: {
-    attempts: RETRY.MAX_ATTEMPTS,
-    delay: RETRY.BASE_DELAY_MS,
-    backoffMultiplier: 2,
-  },
   execute: async ({ inputData, getInitData }) => {
     const initData = getInitData();
     const wfId = initData.workflowId ?? "unknown";
@@ -188,11 +182,6 @@ const parsingStep = createStep({
   description: "OCR / structural extraction of clauses from the contract document",
   inputSchema: DocumentAgentOutputSchema,
   outputSchema: ParsingAgentOutputSchema,
-  retryConfig: {
-    attempts: RETRY.MAX_ATTEMPTS,
-    delay: RETRY.BASE_DELAY_MS,
-    backoffMultiplier: 2,
-  },
   execute: async ({ inputData, getInitData }) => {
     const initData = getInitData();
     const wfId = initData.workflowId ?? "unknown";
@@ -220,11 +209,6 @@ const embeddingStep = createStep({
   description: "Generate text-embedding-3-large vectors and upsert to Qdrant contracts",
   inputSchema: ParsingAgentOutputSchema,
   outputSchema: EmbeddingAgentOutputSchema,
-  retryConfig: {
-    attempts: RETRY.MAX_ATTEMPTS,
-    delay: RETRY.BASE_DELAY_MS,
-    backoffMultiplier: 2,
-  },
   execute: async ({ inputData, getInitData }) => {
     const initData = getInitData();
     const wfId = initData.workflowId ?? "unknown";
@@ -727,7 +711,7 @@ export const contractAnalysisWorkflow = createWorkflow({
   inputSchema: WorkflowInputSchema,
   outputSchema: WorkflowOutputSchema,
 })
-  .step(documentValidationStep)
+  .then(documentValidationStep)
   .then(parsingStep)
   .then(embeddingStep)
   .then(classificationAndRetrievalStep)

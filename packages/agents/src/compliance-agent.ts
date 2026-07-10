@@ -13,6 +13,7 @@ import { LLM_MODELS } from "@lexguard/shared/constants";
 import { recordLlmTokens } from "@lexguard/observability/metrics";
 import { getEnv } from "@lexguard/shared/env";
 import type { RetrievedItem } from "@lexguard/shared/schemas";
+import { gpt4o } from "./models";
 
 export interface ComplianceAgentInput {
   contractId: string; orgId: string; jurisdiction: string;
@@ -65,14 +66,24 @@ Return JSON: {"isCompliant":bool,"jurisdictionVerified":bool,"findings":[{"regul
     } catch {
       result = { isCompliant: false, jurisdictionVerified: false, findings: [{ regulation: "Unknown", section: "N/A", offendingLanguage: context.clauseText.slice(0, 80), requiredCorrection: "Manual review required", severity: "Warning" }] };
     }
-    return { isCompliant: result.isCompliant ?? false, jurisdictionVerified: result.jurisdictionVerified ?? false, findings: result.findings ?? [], promptHash, inputTokens, outputTokens, latencyMs: Date.now() - start };
+    const findings = Array.isArray(result.findings)
+      ? result.findings.map((item: any) => ({
+          regulation: item.regulation ?? "Unknown",
+          section: item.section ?? "N/A",
+          offendingLanguage: item.offendingLanguage ?? "",
+          requiredCorrection: item.requiredCorrection ?? "Manual review required",
+          severity: item.severity ?? "Warning",
+        }))
+      : [];
+
+    return { isCompliant: result.isCompliant ?? false, jurisdictionVerified: result.jurisdictionVerified ?? false, findings, promptHash, inputTokens, outputTokens, latencyMs: Date.now() - start };
   },
 });
 
 export const complianceAgent = new Agent({
   name: "compliance-agent",
   instructions: "Check legal clauses for compliance using check_compliance. Flag if uncertain. Cite specific regulation+section. GDPR/CCPA aware. Escalate to HITL if jurisdictionVerified=false.",
-  model: { provider: "OPEN_AI", name: "gpt-4o", toolChoice: "required" },
+  model: gpt4o,
   tools: { check_compliance: checkComplianceTool },
 });
 

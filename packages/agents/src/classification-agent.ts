@@ -21,6 +21,7 @@
 import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
+import { gpt4oMini } from "./models";
 import OpenAI from "openai";
 import {
   type ClassificationAgentInput,
@@ -155,11 +156,7 @@ Always report:
 Clauses that are truly unclassifiable should still be given a best-effort type, 
 with confidence < 0.5 to signal uncertainty to the downstream HITL system.`,
 
-  model: {
-    provider: "OPEN_AI",
-    name: "gpt-4o-mini",
-    toolChoice: "auto",
-  },
+  model: gpt4oMini,
 
   tools: {
     classify_clause_llm: classifyClauseLlmTool,

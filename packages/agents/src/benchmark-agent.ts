@@ -23,6 +23,7 @@ import { z } from "zod";
 import crypto from "crypto";
 import OpenAI from "openai";
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
+import { gpt4o } from "./models";
 import { LLM_MODELS } from "@lexguard/shared/constants";
 import { recordLlmTokens } from "@lexguard/observability/metrics";
 import { getEnv } from "@lexguard/shared/env";
@@ -184,10 +185,18 @@ const benchmarkClauseTool = createTool({
       };
     }
 
+    const topComparables = Array.isArray(result.topComparables)
+      ? result.topComparables.map((item: any) => ({
+          source: item.source ?? "Unknown",
+          similarityScore: item.similarityScore ?? 0,
+          keyDifferences: item.keyDifferences ?? "",
+        }))
+      : [];
+
     return {
       percentileRank: result.percentileRank ?? 50,
       marketPosition: result.marketPosition ?? "Market Standard",
-      topComparables: result.topComparables ?? [],
+      topComparables,
       deltasSummary: result.deltasSummary ?? "",
       promptHash,
       inputTokens,
@@ -204,7 +213,7 @@ export const benchmarkAgent = new Agent({
   instructions: `You are the Benchmark Agent in LexGuard AI. Compare legal clauses against industry templates.
 Use benchmark_clause to produce: percentile rank, market position (Above/Standard/Below Market), top 3 comparable templates, delta summary.
 If no templates retrieved, return percentile 50 / Market Standard. Always cite template sources.`,
-  model: { provider: "OPEN_AI", name: "gpt-4o", toolChoice: "required" },
+  model: gpt4o,
   tools: { benchmark_clause: benchmarkClauseTool },
 });
 

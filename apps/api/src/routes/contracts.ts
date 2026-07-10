@@ -26,7 +26,7 @@ import { authMiddleware, requireRole } from "../middleware/auth";
 import { triggerContractAnalysis } from "@lexguard/workflows/contract-analysis";
 import { executeQAAgent } from "@lexguard/agents/qa-agent";
 import { executeMemoryAgent } from "@lexguard/agents/memory-agent";
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import {
   ContractUploadRequestSchema,
   QARequestSchema,
@@ -93,7 +93,7 @@ async function createAuditLog(params: {
         contractId: params.contractId,
         agentId: params.agentId,
         eventType: params.eventType,
-        payload: params.payload,
+        payload: params.payload as Prisma.InputJsonValue | undefined,
       },
     });
   } catch (err) {
@@ -409,7 +409,8 @@ contractsRouter.get(
         workflowStatus: true,
         workflowStep: true,
         progressPct: true,
-        updatedAt: true,
+        createdAt: true,
+        completedAt: true,
       },
     });
     if (!contract) {
@@ -424,10 +425,7 @@ contractsRouter.get(
       currentStep: contract.workflowStep ?? "unknown",
       progress: contract.progressPct,
       status: contract.status.toLowerCase(),
-      updatedAt:
-        contract.updatedAt instanceof Date
-          ? contract.updatedAt.toISOString()
-          : null,
+      updatedAt: (contract.completedAt ?? contract.createdAt).toISOString(),
     });
   }
 );

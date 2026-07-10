@@ -26,6 +26,7 @@ import { recordLlmTokens } from "@lexguard/observability/metrics";
 import { runEnkryptPipeline } from "@lexguard/enkrypt/pipeline";
 import { getEnv } from "@lexguard/shared/env";
 import type { QARequest, QAResponse } from "@lexguard/shared/schemas";
+import { gpt4o } from "./models";
 
 async function embedText(text: string): Promise<number[]> {
   const env = getEnv();
@@ -124,7 +125,7 @@ export const qaAgent = new Agent({
 Steps: (1) retrieve_clause_context (2) answer_legal_question (3) store_conversation_turn for both user Q and your A.
 Always cite the specific clause. Never give definitive legal advice — recommend qualified attorney review.
 Cross-jurisdictional: always note which jurisdiction applies.`,
-  model: { provider: "OPEN_AI", name: "gpt-4o", toolChoice: "required" },
+  model: gpt4o,
   tools: { retrieve_clause_context: retrieveClauseContextTool, answer_legal_question: answerQuestionTool, store_conversation_turn: storeConversationTurnTool },
 });
 

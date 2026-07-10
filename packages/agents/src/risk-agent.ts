@@ -23,6 +23,7 @@
 import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
+import { gpt4o } from "./models";
 import crypto from "crypto";
 import OpenAI from "openai";
 import {
@@ -242,11 +243,7 @@ For each clause:
 
 The 4-step chain-of-thought reasoning is MANDATORY before producing output.`,
 
-  model: {
-    provider: "OPEN_AI",
-    name: "gpt-4o",
-    toolChoice: "required",
-  },
+  model: gpt4o,
 
   tools: {
     analyze_clause_risk: analyzeClauseRiskTool,

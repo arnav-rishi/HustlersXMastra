@@ -386,7 +386,11 @@ describe("contracts routes", () => {
 
     expect(response.status).toBe(200);
     // Verify the updateMany call includes analysisJson
-    const updateManyCall = prismaMock.contract.updateMany.mock.calls[0][0];
+    const updateManyCall = prismaMock.contract.updateMany.mock.calls[0]?.[0];
+    expect(updateManyCall).toBeDefined();
+    if (!updateManyCall) {
+      throw new Error("Expected contract.updateMany to be called");
+    }
     expect(updateManyCall.data.analysisJson).toBeDefined();
     expect(updateManyCall.data.analysisJson.decision).toBe("reject");
     expect(updateManyCall.data.status).toBe("COMPLETED");

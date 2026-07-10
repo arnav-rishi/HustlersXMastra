@@ -27,6 +27,7 @@
 import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
+import { gpt4o } from "./models";
 import {
   type ParsingAgentInput,
   type ParsingAgentOutput,
@@ -240,11 +241,7 @@ IMPORTANT RULES:
 
 Do NOT perform legal analysis — only extract and structure the raw text.`,
 
-  model: {
-    provider: "OPEN_AI",
-    name: "gpt-4o",
-    toolChoice: "required",
-  },
+  model: gpt4o,
 
   tools: {
     extract_digital_pdf: extractDigitalPdfTool,
