@@ -14,6 +14,7 @@ import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
 import { LLM_MODELS } from "@lexguard/shared/constants";
 import { recordLlmTokens } from "@lexguard/observability/metrics";
 import { getEnv } from "@lexguard/shared/env";
+import { gpt4oMini } from "./models";
 
 const generateRewritesTool = createTool({
   id: "generate_clause_rewrites",
@@ -92,7 +93,7 @@ Return JSON: {"rewrites":[{"version":1,"strategy":"...","text":"...","changes":[
 export const rewriteAgent = new Agent({
   name: "rewrite-agent",
   instructions: "Generate exactly 3 legally-sound clause rewrites using generate_clause_rewrites. Prefer mutual indemnification. Cap liability at 2x ACV. Add notice periods. Chain-of-thought per rewrite is mandatory.",
-  model: { provider: "OPEN_AI", name: "gpt-4o-mini", toolChoice: "required" },
+  model: gpt4oMini,
   tools: { generate_clause_rewrites: generateRewritesTool },
 });
 

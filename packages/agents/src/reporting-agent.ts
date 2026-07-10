@@ -16,6 +16,7 @@ import { LLM_MODELS, RISK_SEVERITY } from "@lexguard/shared/constants";
 import { recordLlmTokens } from "@lexguard/observability/metrics";
 import { getEnv } from "@lexguard/shared/env";
 import type { AnalysisReport, RiskSeverity } from "@lexguard/shared/schemas";
+import { gpt4oMini } from "./models";
 
 export interface ReportingAgentInput {
   contractId: string;
@@ -75,7 +76,7 @@ Use generate_executive_summary to produce a board-ready summary (150 words, FK >
 The report must include: executive summary, clause-by-clause breakdown, benchmark scores, rewrite suggestions, compliance flags, Enkrypt confidence scores, HITL status.
 Do NOT include any finding with confidence < 0.70 without a HITL disclaimer.
 Use Critical/Moderate/Low labels consistently throughout.`,
-  model: { provider: "OPEN_AI", name: "gpt-4o-mini", toolChoice: "required" },
+  model: gpt4oMini,
   tools: { generate_executive_summary: generateExecutiveSummaryTool },
 });
 

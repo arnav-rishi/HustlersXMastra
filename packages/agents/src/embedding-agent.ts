@@ -22,6 +22,7 @@
 import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
+import { gpt4oMini } from "./models";
 import { v4 as uuidv4 } from "uuid";
 import OpenAI from "openai";
 import {
@@ -211,11 +212,7 @@ CRITICAL:
 - The upsert must include all metadata fields: contract_id, org_id, tenant_id, clause_type, jurisdiction
 - Report the total chunks upserted and latency in your response`,
 
-  model: {
-    provider: "OPEN_AI",
-    name: "gpt-4o-mini",
-    toolChoice: "required",
-  },
+  model: gpt4oMini,
 
   tools: {
     generate_embeddings: generateEmbeddingsTool,
@@ -277,6 +274,7 @@ export async function executeEmbeddingAgent(
 
       const output: EmbeddingAgentOutput = {
         contractId: input.contractId,
+        clauses: input.clauses,
         chunksUpserted: upsertResult.upsertedCount,
         embeddingModel: EMBEDDING_MODEL,
         qdrantCollection: QDRANT_COLLECTIONS.CONTRACTS,

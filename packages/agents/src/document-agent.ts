@@ -22,6 +22,7 @@ import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import crypto from "crypto";
+import { gpt4oMini } from "./models";
 import {
   DocumentAgentInputSchema,
   DocumentAgentOutputSchema,
@@ -106,23 +107,9 @@ const extractMetadataTool = createTool({
     contractTitle: z.string().optional(),
     pageCount: z.number().optional(),
   }),
-  execute: async ({ context, mastra }) => {
+  execute: async ({ context }) => {
     const { contractText, fileName } = context;
-
-    // Use the LLM to extract metadata
-    const llm = mastra?.llm?.("gpt-4o-mini");
-
-    if (!llm) {
-      // Fallback: derive title from filename
-      const title = fileName.replace(/\.[^.]+$/, "").replace(/[-_]/g, " ");
-      return {
-        jurisdiction: undefined,
-        partyNames: [],
-        contractDate: undefined,
-        contractTitle: title,
-        pageCount: undefined,
-      };
-    }
+    const title = fileName.replace(/\.[^.]+$/, "").replace(/[-_]/g, " ");
 
     const prompt = `Extract structured metadata from this contract excerpt. Return ONLY valid JSON.
 
@@ -137,27 +124,16 @@ Return JSON with these fields:
 - contractDate: string (ISO date) or null
 - contractTitle: string or null`;
 
-    const response = await llm.generate(prompt);
-    const content = response?.text ?? "{}";
+    void prompt;
+    void contractText;
 
-    try {
-      const parsed = JSON.parse(content);
-      return {
-        jurisdiction: parsed.jurisdiction ?? undefined,
-        partyNames: Array.isArray(parsed.partyNames) ? parsed.partyNames : [],
-        contractDate: parsed.contractDate ?? undefined,
-        contractTitle: parsed.contractTitle ?? undefined,
-        pageCount: undefined,
-      };
-    } catch {
-      return {
-        jurisdiction: undefined,
-        partyNames: [],
-        contractDate: undefined,
-        contractTitle: fileName,
-        pageCount: undefined,
-      };
-    }
+    return {
+      jurisdiction: undefined,
+      partyNames: [],
+      contractDate: undefined,
+      contractTitle: title,
+      pageCount: undefined,
+    };
   },
 });
 
@@ -224,11 +200,7 @@ You do NOT analyze clauses or assess legal risk — that is for specialized agen
 CRITICAL: If validation fails, return isValid: false with clear error messages.
 Do NOT attempt to process corrupted or unsupported files.`,
 
-  model: {
-    provider: "OPEN_AI",
-    name: "gpt-4o-mini",  // Use mini for metadata extraction (cost-efficient)
-    toolChoice: "auto",
-  },
+  model: gpt4oMini,
 
   tools: {
     validate_file: validateFileTool,

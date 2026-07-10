@@ -14,6 +14,7 @@ import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
 import { QDRANT_COLLECTIONS, EMBEDDING_MODEL, EMBEDDING_DIMENSIONS, SLA } from "@lexguard/shared/constants";
 import { getQdrantClient } from "@lexguard/qdrant/client";
 import { getEnv } from "@lexguard/shared/env";
+import { gpt4oMini } from "./models";
 
 async function embedText(text: string): Promise<number[]> {
   const env = getEnv();
@@ -99,7 +100,7 @@ export const memoryAgent = new Agent({
 - REJECT → call persist_risk_pattern to learn this clause as a toxic pattern
 - APPROVE/EDIT → call persist_org_preference to record the preferred language
 Always use org_id for tenant isolation. Write both collections when both are relevant.`,
-  model: { provider: "OPEN_AI", name: "gpt-4o-mini", toolChoice: "required" },
+  model: gpt4oMini,
   tools: { persist_risk_pattern: persistRiskPatternTool, persist_org_preference: persistOrgPreferenceTool },
 });
 

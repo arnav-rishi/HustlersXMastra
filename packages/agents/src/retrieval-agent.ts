@@ -24,6 +24,7 @@
 import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
+import { gpt4oMini } from "./models";
 import OpenAI from "openai";
 import {
   type RetrievalAgentInput,
@@ -207,11 +208,7 @@ RULES:
 
 Use the search_qdrant_collection tool for each relevant collection.`,
 
-  model: {
-    provider: "OPEN_AI",
-    name: "gpt-4o-mini",
-    toolChoice: "auto",
-  },
+  model: gpt4oMini,
 
   tools: {
     search_qdrant_collection: searchQdrantTool,

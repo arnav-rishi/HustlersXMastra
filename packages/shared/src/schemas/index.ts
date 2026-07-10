@@ -120,6 +120,7 @@ export const EmbeddingAgentInputSchema = z.object({
 
 export const EmbeddingAgentOutputSchema = z.object({
   contractId: UUIDSchema,
+  clauses: z.array(ExtractedClauseSchema),
   chunksUpserted: z.number(),
   embeddingModel: z.string(),
   qdrantCollection: z.string(),

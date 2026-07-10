@@ -12,6 +12,7 @@ import { ENKRYPT_CONFIDENCE_THRESHOLD } from "@lexguard/shared/constants";
 import { recordEnkryptPipelineLatency } from "@lexguard/observability/metrics";
 import { runEnkryptPipeline } from "@lexguard/enkrypt/pipeline";
 import type { EnkryptValidationResult } from "@lexguard/shared/schemas";
+import { gpt4oMini } from "./models";
 
 export interface EvaluationAgentInput {
   contractId: string;
@@ -82,7 +83,7 @@ export const evaluationAgent = new Agent({
   instructions: `You are the Evaluation Agent in LexGuard AI. Every LLM output MUST pass through the Enkrypt 10-stage pipeline before delivery.
 Use run_enkrypt_pipeline for every output — no exceptions. If overallPass=false or confidenceScore < ${ENKRYPT_CONFIDENCE_THRESHOLD}, route to HITL.
 100% coverage: zero outputs reach the user without passing all 10 stages. (PRD: LG-AI-003)`,
-  model: { provider: "OPEN_AI", name: "gpt-4o-mini", toolChoice: "required" },
+  model: gpt4oMini,
   tools: { run_enkrypt_pipeline: runEnkryptTool },
 });
 
