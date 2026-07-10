@@ -52,16 +52,16 @@ const runEnkryptTool = createTool({
     groupALatencyMs: z.number(), groupBLatencyMs: z.number(),
     groupCLatencyMs: z.number(), totalLatencyMs: z.number(),
   }),
-  execute: async ({ context }) => {
+  execute: async (input, context) => {
     const result = await runEnkryptPipeline({
-      sessionId: context.sessionId,
-      agentId: context.agentId,
-      inputText: context.inputText,
-      outputText: context.outputText,
-      retrievedContext: context.retrievedContext,
-      orgId: context.orgId,
-      jurisdiction: context.jurisdiction,
-      clauseType: context.clauseType,
+      sessionId: input.sessionId,
+      agentId: input.agentId,
+      inputText: input.inputText,
+      outputText: input.outputText,
+      retrievedContext: input.retrievedContext,
+      orgId: input.orgId,
+      jurisdiction: input.jurisdiction,
+      clauseType: input.clauseType,
     });
     return {
       overallPass: result.overallPass,
@@ -78,7 +78,8 @@ const runEnkryptTool = createTool({
   },
 });
 
-export const evaluationAgent = new Agent({
+export const evaluationAgent: Agent = new Agent({
+  id: "evaluation-agent",
   name: "evaluation-agent",
   instructions: `You are the Evaluation Agent in LexGuard AI. Every LLM output MUST pass through the Enkrypt 10-stage pipeline before delivery.
 Use run_enkrypt_pipeline for every output — no exceptions. If overallPass=false or confidenceScore < ${ENKRYPT_CONFIDENCE_THRESHOLD}, route to HITL.

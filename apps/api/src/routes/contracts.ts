@@ -19,6 +19,7 @@
  */
 
 import { Router, type Request, type Response } from "express";
+import type { Router as ExpressRouter } from "express";
 import multer from "multer";
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
@@ -34,7 +35,7 @@ import {
 } from "@lexguard/shared/schemas";
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
 
-export const contractsRouter = Router();
+export const contractsRouter: ExpressRouter = Router();
 const prisma = new PrismaClient();
 
 function getDocumentTypeFromMime(mimeType: string): "DIGITAL_PDF" | "SCANNED_PDF" | "DOCX" {
@@ -93,7 +94,7 @@ async function createAuditLog(params: {
         contractId: params.contractId,
         agentId: params.agentId,
         eventType: params.eventType,
-        payload: params.payload as Prisma.InputJsonValue | undefined,
+        payload: params.payload as any,
       },
     });
   } catch (err) {
@@ -425,7 +426,7 @@ contractsRouter.get(
       currentStep: contract.workflowStep ?? "unknown",
       progress: contract.progressPct,
       status: contract.status.toLowerCase(),
-      updatedAt: (contract.completedAt ?? contract.createdAt).toISOString(),
+      updatedAt: ((contract.completedAt ?? contract.createdAt) ?? new Date()).toISOString(),
     });
   }
 );
@@ -494,7 +495,7 @@ contractsRouter.get("/pending", authMiddleware, async (req: Request, res: Respon
     });
 
     return res.status(200).json({
-      items: pendingContracts.map((contract) => ({
+      items: pendingContracts.map((contract: any) => ({
         id: contract.id,
         name: contract.fileName,
         type: contract.documentType,
@@ -546,7 +547,7 @@ contractsRouter.get(
       skip,
     });
     return res.status(200).json({
-      items: items.map((item) => ({
+      items: items.map((item: any) => ({
         id: item.id,
         contractId: item.contractId,
         clauseIndex: item.clauseIndex,

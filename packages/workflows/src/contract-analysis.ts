@@ -85,7 +85,7 @@ async function recordStageMetric<T>(
     .create({
       data: { contractId, workflowId, stageName, status: "started" },
     })
-    .catch((e) =>
+    .catch((e: any) =>
       console.warn(`[LexGuard][Workflow] Stage metric insert failed (${stageName}):`, e)
     );
 
@@ -96,7 +96,7 @@ async function recordStageMetric<T>(
       .create({
         data: { contractId, workflowId, stageName, status: "completed", durationMs },
       })
-      .catch((e) =>
+      .catch((e: any) =>
         console.warn(`[LexGuard][Workflow] Stage metric update failed (${stageName}):`, e)
       );
     return result;
@@ -107,7 +107,7 @@ async function recordStageMetric<T>(
       .create({
         data: { contractId, workflowId, stageName, status: "failed", durationMs, errorMessage },
       })
-      .catch((e) =>
+      .catch((e: any) =>
         console.warn(`[LexGuard][Workflow] Stage metric failure insert failed (${stageName}):`, e)
       );
     throw err; // re-throw so Mastra retry logic sees the error
@@ -135,6 +135,8 @@ const WorkflowInputSchema = z.object({
   workflowId: z.string().optional(),
 });
 
+type WorkflowInput = z.infer<typeof WorkflowInputSchema>;
+
 const WorkflowOutputSchema = z.object({
   contractId: z.string().uuid(),
   workflowId: z.string(),
@@ -153,7 +155,7 @@ const documentValidationStep = createStep({
   inputSchema: WorkflowInputSchema,
   outputSchema: DocumentAgentOutputSchema,
   execute: async ({ inputData, getInitData }) => {
-    const initData = getInitData();
+    const initData = getInitData<WorkflowInput>();
     const wfId = initData.workflowId ?? "unknown";
     return recordStageMetric(inputData.contractId, wfId, "document-validation", () =>
       executeDocumentAgent({
@@ -183,7 +185,7 @@ const parsingStep = createStep({
   inputSchema: DocumentAgentOutputSchema,
   outputSchema: ParsingAgentOutputSchema,
   execute: async ({ inputData, getInitData }) => {
-    const initData = getInitData();
+    const initData = getInitData<WorkflowInput>();
     const wfId = initData.workflowId ?? "unknown";
     return recordStageMetric(inputData.contractId, wfId, "parsing", () =>
       executeParsingAgent({
@@ -210,7 +212,7 @@ const embeddingStep = createStep({
   inputSchema: ParsingAgentOutputSchema,
   outputSchema: EmbeddingAgentOutputSchema,
   execute: async ({ inputData, getInitData }) => {
-    const initData = getInitData();
+    const initData = getInitData<WorkflowInput>();
     const wfId = initData.workflowId ?? "unknown";
     return recordStageMetric(inputData.contractId, wfId, "embedding", () =>
       executeEmbeddingAgent({
@@ -249,7 +251,7 @@ const classificationAndRetrievalStep = createStep({
     tenantId: z.string().uuid(),
   }),
   execute: async ({ inputData, getInitData }) => {
-    const initData = getInitData();
+    const initData = getInitData<WorkflowInput>();
     const wfId = initData.workflowId ?? "unknown";
     return recordStageMetric(inputData.contractId, wfId, "classification-and-retrieval", async () => {
       const classified = await executeClassificationAgent({
@@ -318,7 +320,7 @@ const riskAndBenchmarkStep = createStep({
     tenantId: z.string().uuid(),
   }),
   execute: async ({ inputData, getInitData }) => {
-    const initData = getInitData();
+    const initData = getInitData<WorkflowInput>();
     const wfId = initData.workflowId ?? "unknown";
     return recordStageMetric(inputData.contractId, wfId, "risk-and-benchmark", async () => {
       const riskResults = await Promise.all(
@@ -393,7 +395,7 @@ const rewriteStep = createStep({
     tenantId: z.string().uuid(),
   }),
   execute: async ({ inputData, getInitData }) => {
-    const initData = getInitData();
+    const initData = getInitData<WorkflowInput>();
     const wfId = initData.workflowId ?? "unknown";
     return recordStageMetric(inputData.contractId, wfId, "rewrite", async () => {
       const rewriteResults = await Promise.all(
@@ -461,7 +463,7 @@ const complianceStep = createStep({
     tenantId: z.string().uuid(),
   }),
   execute: async ({ inputData, getInitData }) => {
-    const initData = getInitData();
+    const initData = getInitData<WorkflowInput>();
     const wfId = initData.workflowId ?? "unknown";
     return recordStageMetric(inputData.contractId, wfId, "compliance", async () => {
       const complianceResults = await Promise.all(
@@ -532,7 +534,7 @@ const evaluationStep = createStep({
     orgId: z.string().uuid(),
   }),
   execute: async ({ inputData, getInitData }) => {
-    const initData = getInitData();
+    const initData = getInitData<WorkflowInput>();
     const wfId = initData.workflowId ?? "unknown";
     return recordStageMetric(inputData.contractId, wfId, "evaluation", async () => {
       const serializedOutput = JSON.stringify({
@@ -602,7 +604,7 @@ const hitlGateStep = createStep({
   }),
   // Mastra native suspend support
   execute: async ({ inputData, suspend, getInitData }) => {
-    const initData = getInitData();
+    const initData = getInitData<WorkflowInput>();
     const wfId = initData.workflowId ?? "unknown";
     return recordStageMetric(inputData.contractId, wfId, "hitl-gate", async () => {
       if (inputData.hitlRequired) {
@@ -667,7 +669,7 @@ const reportingStep = createStep({
     status: z.literal("completed"),
   }),
   execute: async ({ inputData, getInitData }) => {
-    const initData = getInitData();
+    const initData = getInitData<WorkflowInput>();
     const wfId = initData.workflowId ?? "unknown";
     return recordStageMetric(inputData.contractId, wfId, "reporting", async () => {
       const report = await executeReportingAgent({
@@ -725,7 +727,7 @@ export const contractAnalysisWorkflow = createWorkflow({
 
 // ─── Mastra Instance ──────────────────────────────────────────────────────────
 
-export const mastra = new Mastra({
+export const mastra: Mastra = new Mastra({
   workflows: {
     "contract-analysis": contractAnalysisWorkflow,
   },

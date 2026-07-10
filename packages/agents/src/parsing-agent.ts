@@ -58,8 +58,8 @@ const extractDigitalPdfTool = createTool({
     ocrConfidence: z.number().min(0).max(1),
     engine: z.literal("unstructured"),
   }),
-  execute: async ({ context }) => {
-    const { s3Key, contractId } = context;
+  execute: async (input, context) => {
+    const { s3Key, contractId } = input;
 
     // In production:
     // const client = new UnstructuredClient({ serverURL: process.env.UNSTRUCTURED_URL });
@@ -150,8 +150,8 @@ const extractScannedPdfTool = createTool({
     engine: z.literal("tesseract"),
     rawTextFallback: z.boolean(),
   }),
-  execute: async ({ context }) => {
-    const { s3Key } = context;
+  execute: async (input, context) => {
+    const { s3Key } = input;
 
     // In production:
     // Use node-tesseract-ocr or python-bridge to Tesseract
@@ -189,8 +189,8 @@ const identifyClauseBoundariesTool = createTool({
     clauses: z.array(ExtractedClauseSchema),
     totalClauses: z.number(),
   }),
-  execute: async ({ context }) => {
-    const { rawText } = context;
+  execute: async (input, context) => {
+    const { rawText } = input;
 
     // In production: use a combination of:
     // 1. Regex patterns for numbered sections (e.g., "5. INDEMNIFICATION")
@@ -222,7 +222,8 @@ const identifyClauseBoundariesTool = createTool({
 
 // ─── Agent Definition ─────────────────────────────────────────────────────────
 
-export const parsingAgent = new Agent({
+export const parsingAgent: Agent = new Agent({
+  id: "parsing-agent",
   name: "parsing-agent",
   instructions: `You are the Parsing Agent in the LexGuard AI legal intelligence platform.
 
@@ -279,15 +280,15 @@ export async function executeParsingAgent(
          Contract ID: ${input.contractId}
          ${toolChoice}`,
         {
-          threadId: input.contractId,
-          resourceId: input.orgId,
+          memory: {
+            thread: input.contractId,
+            resource: input.orgId,
+          },
         }
       );
 
       // For now, use the digital PDF tool directly in executor
-      const extractResult = await extractDigitalPdfTool.execute({
-        context: { s3Key: input.s3Key, contractId: input.contractId },
-      } as any);
+      const extractResult = (await extractDigitalPdfTool.execute?.({ s3Key: input.s3Key, contractId: input.contractId }, {} as any)) as any || { clauses: [], pageCount: 0, ocrConfidence: 0, engine: "unstructured" };
 
       const output: ParsingAgentOutput = {
         contractId: input.contractId,

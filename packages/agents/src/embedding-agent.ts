@@ -68,8 +68,8 @@ const generateEmbeddingsTool = createTool({
     model: z.string(),
     totalTokens: z.number(),
   }),
-  execute: async ({ context }) => {
-    const { texts, model } = context;
+  execute: async (input, context) => {
+    const { texts, model } = input;
     const openai = getOpenAIClient();
 
     // Process in batches of 100
@@ -135,7 +135,7 @@ const upsertToQdrantTool = createTool({
     chunkIds: z.array(z.string().uuid()),
     upsertLatencyMs: z.number(),
   }),
-  execute: async ({ context }) => {
+  execute: async (input, context) => {
     const {
       contractId,
       orgId,
@@ -143,7 +143,7 @@ const upsertToQdrantTool = createTool({
       jurisdiction,
       clauses,
       embeddings,
-    } = context;
+    } = input;
 
     const qdrant = getQdrantClient();
     const start = Date.now();
@@ -196,7 +196,8 @@ const upsertToQdrantTool = createTool({
 
 // ─── Agent Definition ─────────────────────────────────────────────────────────
 
-export const embeddingAgent = new Agent({
+export const embeddingAgent: Agent = new Agent({
+  id: "embedding-agent",
   name: "embedding-agent",
   instructions: `You are the Embedding Agent in the LexGuard AI legal intelligence platform.
 
@@ -244,27 +245,10 @@ export async function executeEmbeddingAgent(
 
       // Step 1: Generate embeddings for all clause texts
       const texts = input.clauses.map((c) => c.clauseText);
-      const embeddingResult = await generateEmbeddingsTool.execute({
-        context: { texts, model: EMBEDDING_MODEL },
-      } as any);
+      const embeddingResult = (await generateEmbeddingsTool.execute?.({ texts, model: EMBEDDING_MODEL }, {} as any)) as any || { embeddings: [], model: EMBEDDING_MODEL, totalTokens: 0 };
 
       // Step 2: Upsert to Qdrant with full metadata
-      const upsertResult = await upsertToQdrantTool.execute({
-        context: {
-          contractId: input.contractId,
-          orgId: input.orgId,
-          tenantId: input.tenantId,
-          jurisdiction: input.jurisdiction,
-          clauses: input.clauses.map((c) => ({
-            clauseIndex: c.clauseIndex,
-            clauseType: c.clauseType,
-            clauseText: c.clauseText,
-            pageNumber: c.pageNumber,
-            boundingBox: c.boundingBox,
-          })),
-          embeddings: embeddingResult.embeddings,
-        },
-      } as any);
+      const upsertResult = (await upsertToQdrantTool.execute?.({ contractId: input.contractId, orgId: input.orgId, tenantId: input.tenantId, jurisdiction: input.jurisdiction, clauses: input.clauses.map((c) => ({ clauseIndex: c.clauseIndex, clauseType: c.clauseType, clauseText: c.clauseText, pageNumber: c.pageNumber, boundingBox: c.boundingBox })), embeddings: embeddingResult.embeddings }, {} as any)) as any || { upsertedCount: 0, chunkIds: [], upsertLatencyMs: 0 };
 
       // OTel attributes
       span.setAttribute("embedding.chunk_count", input.clauses.length);

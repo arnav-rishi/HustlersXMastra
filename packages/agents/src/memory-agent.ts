@@ -35,20 +35,20 @@ const persistRiskPatternTool = createTool({
     rejectionReason: z.string(),
   }),
   outputSchema: z.object({ pointId: z.string().uuid(), collection: z.string(), latencyMs: z.number() }),
-  execute: async ({ context }) => {
+  execute: async (input, context) => {
     const start = Date.now();
     const qdrant = getQdrantClient();
-    const vector = await embedText(context.clauseText);
+    const vector = await embedText(input.clauseText);
     const pointId = uuidv4();
     await qdrant.upsertPoints(QDRANT_COLLECTIONS.RISK_PATTERNS, [{
       id: pointId,
       vector,
       payload: {
         pattern_id: pointId,
-        org_id: context.orgId,
-        clause_type: context.clauseType,
-        pattern_description: context.patternDescription,
-        risk_level: context.riskLevel,
+        org_id: input.orgId,
+        clause_type: input.clauseType,
+        pattern_description: input.patternDescription,
+        risk_level: input.riskLevel,
         learned_from_hitl: true,
         rejection_count: 1,
         last_updated: new Date().toISOString(),
@@ -73,20 +73,20 @@ const persistOrgPreferenceTool = createTool({
     createdBy: z.string().uuid(),
   }),
   outputSchema: z.object({ pointId: z.string().uuid(), collection: z.string(), latencyMs: z.number() }),
-  execute: async ({ context }) => {
+  execute: async (input, context) => {
     const start = Date.now();
     const qdrant = getQdrantClient();
-    const vector = await embedText(context.preferredLanguage);
+    const vector = await embedText(input.preferredLanguage);
     const pointId = uuidv4();
     await qdrant.upsertPoints(QDRANT_COLLECTIONS.ORG_PREFERENCES, [{
       id: pointId,
       vector,
       payload: {
-        org_id: context.orgId,
-        preference_type: context.preferenceType,
-        preferred_language: context.preferredLanguage,
-        approved_alternatives: context.approvedAlternatives,
-        created_by: context.createdBy,
+        org_id: input.orgId,
+        preference_type: input.preferenceType,
+        preferred_language: input.preferredLanguage,
+        approved_alternatives: input.approvedAlternatives,
+        created_by: input.createdBy,
         updated_at: new Date().toISOString(),
       },
     }]);
@@ -94,7 +94,8 @@ const persistOrgPreferenceTool = createTool({
   },
 });
 
-export const memoryAgent = new Agent({
+export const memoryAgent: Agent = new Agent({
+  id: "memory-agent",
   name: "memory-agent",
   instructions: `You are the Memory Agent in LexGuard AI. After every HITL decision:
 - REJECT → call persist_risk_pattern to learn this clause as a toxic pattern
@@ -134,27 +135,14 @@ export async function executeMemoryAgent(input: MemoryAgentInput): Promise<Memor
     let orgPreferenceId: string | undefined;
 
     if (input.decision === "reject") {
-      const r = await persistRiskPatternTool.execute({
-        context: {
-          orgId: input.orgId, clauseType: input.clauseType, clauseText: input.clauseText,
-          patternDescription: input.riskDescription, riskLevel: input.riskLevel,
-          rejectionReason: "Human reviewer rejected this clause pattern",
-        },
-      } as any);
+      const r = (await persistRiskPatternTool.execute?.({ orgId: input.orgId, clauseType: input.clauseType, clauseText: input.clauseText, patternDescription: input.riskDescription, riskLevel: input.riskLevel, rejectionReason: "Human reviewer rejected this clause pattern" }, {} as any)) as any || {};
       riskPatternId = r.pointId;
       collectionsUpdated.push(QDRANT_COLLECTIONS.RISK_PATTERNS);
     }
 
     if (input.decision === "approve" || input.decision === "edit") {
       const preferredText = input.editedText ?? input.clauseText;
-      const r = await persistOrgPreferenceTool.execute({
-        context: {
-          orgId: input.orgId, preferenceType: input.clauseType,
-          preferredLanguage: preferredText,
-          approvedAlternatives: input.editedText ? [input.editedText] : [],
-          createdBy: input.userId,
-        },
-      } as any);
+      const r = (await persistOrgPreferenceTool.execute?.({ orgId: input.orgId, preferenceType: input.clauseType, preferredLanguage: preferredText, approvedAlternatives: input.editedText ? [input.editedText] : [], createdBy: input.userId }, {} as any)) as any || {};
       orgPreferenceId = r.pointId;
       collectionsUpdated.push(QDRANT_COLLECTIONS.ORG_PREFERENCES);
     }

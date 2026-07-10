@@ -19,7 +19,7 @@
     "@lexguard/workflows": "workspace:*",
     "@lexguard/observability": "workspace:*",
     "@lexguard/qdrant": "workspace:*",
-    "@mastra/core": "^0.10.0",
+    "@mastra/core": "^1.50.0",
     "@prisma/client": "^5.15.0",
     "@opentelemetry/auto-instrumentations-node": "^0.47.0",
     "express": "^4.19.0",

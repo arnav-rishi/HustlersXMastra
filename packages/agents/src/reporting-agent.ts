@@ -40,14 +40,14 @@ const generateExecutiveSummaryTool = createTool({
     totalClauses: z.number(), complianceIssues: z.number(), hitlPending: z.number(),
   }),
   outputSchema: z.object({ summary: z.string(), promptHash: z.string(), inputTokens: z.number(), outputTokens: z.number() }),
-  execute: async ({ context }) => {
+  execute: async (input, context) => {
     const env = getEnv();
     const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
     const prompt = `ROLE: Senior Legal Analyst producing a board-ready contract intelligence report.
-Write an executive summary for a ${context.contractTitle} (${context.jurisdiction}).
+Write an executive summary for a ${input.contractTitle} (${input.jurisdiction}).
 Max 150 words. Flesch-Kincaid readability score > 60 (plain English, short sentences, active voice).
 Use labels: Critical / Moderate / Low.
-Facts: ${context.totalClauses} clauses analysed, ${context.criticalCount} Critical risks, ${context.moderateCount} Moderate, ${context.lowCount} Low, ${context.complianceIssues} compliance issues, ${context.hitlPending} items pending human review.
+Facts: ${input.totalClauses} clauses analysed, ${input.criticalCount} Critical risks, ${input.moderateCount} Moderate, ${input.lowCount} Low, ${input.complianceIssues} compliance issues, ${input.hitlPending} items pending human review.
 Return JSON: {"summary":"..."}`;
     const promptHash = crypto.createHash("sha256").update(prompt).digest("hex");
     let summary = ""; let inputTokens = 0, outputTokens = 0;
@@ -61,15 +61,16 @@ Return JSON: {"summary":"..."}`;
       outputTokens = response.usage?.completion_tokens ?? 0;
       const parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
       summary = parsed.summary ?? "Executive summary unavailable.";
-      recordLlmTokens(context.orgId, LLM_MODELS.GPT4O_MINI, inputTokens, outputTokens);
+      recordLlmTokens(input.orgId, LLM_MODELS.GPT4O_MINI, inputTokens, outputTokens);
     } catch {
-      summary = `Contract analysis complete. Found ${context.criticalCount} Critical, ${context.moderateCount} Moderate, and ${context.lowCount} Low risk clauses across ${context.totalClauses} total clauses. ${context.complianceIssues} compliance issues detected. ${context.hitlPending} items require human review.`;
+      summary = `Contract analysis complete. Found ${input.criticalCount} Critical, ${input.moderateCount} Moderate, and ${input.lowCount} Low risk clauses across ${input.totalClauses} total clauses. ${input.complianceIssues} compliance issues detected. ${input.hitlPending} items require human review.`;
     }
     return { summary, promptHash, inputTokens, outputTokens };
   },
 });
 
-export const reportingAgent = new Agent({
+export const reportingAgent: Agent = new Agent({
+  id: "reporting-agent",
   name: "reporting-agent",
   instructions: `You are the Reporting Agent — the final step in the LexGuard AI pipeline.
 Use generate_executive_summary to produce a board-ready summary (150 words, FK > 60).
@@ -105,14 +106,7 @@ export async function executeReportingAgent(input: ReportingAgentInput): Promise
       RISK_SEVERITY.LOW;
 
     // Generate executive summary
-    const summaryResult = await generateExecutiveSummaryTool.execute({
-      context: {
-        contractTitle: input.contractTitle ?? "Contract",
-        jurisdiction: input.jurisdiction,
-        orgId: input.orgId,
-        criticalCount, moderateCount, lowCount, totalClauses, complianceIssues, hitlPending,
-      },
-    } as any);
+    const summaryResult = (await generateExecutiveSummaryTool.execute?.({ contractTitle: input.contractTitle ?? "Contract", jurisdiction: input.jurisdiction, orgId: input.orgId, criticalCount, moderateCount, lowCount, totalClauses, complianceIssues, hitlPending }, {} as any)) as any || { summary: "Executive summary unavailable." };
 
     const reportId = uuidv4();
 
