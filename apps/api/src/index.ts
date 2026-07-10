@@ -30,6 +30,7 @@ initTracer("lexguard-api");
 initMetrics();
 
 import express from "express";
+import type { Express } from "express";
 import helmet from "helmet";
 import cors from "cors";
 import compression from "compression";
@@ -40,7 +41,7 @@ import { getQdrantClient } from "@lexguard/qdrant/client";
 
 // ─── App Setup ────────────────────────────────────────────────────────────────
 
-const app = express();
+const app: Express = express();
 const prisma = new PrismaClient();
 const redis = new Redis(env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 1 });
 

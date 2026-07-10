@@ -143,17 +143,17 @@ const benchmarkClauseTool = createTool({
     outputTokens: z.number(),
     latencyMs: z.number(),
   }),
-  execute: async ({ context }) => {
+  execute: async (input, context) => {
     const env = getEnv();
     const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
 
     const systemPrompt = buildBenchmarkPrompt({
-      clauseType: context.clauseType,
-      orgName: `Org-${context.orgId.slice(0, 8)}`,
-      retrievedTemplates: context.retrievedTemplatesContext || "No comparable templates retrieved.",
-      industrySector: context.industrySector,
-      jurisdiction: context.jurisdiction,
-      clauseText: context.clauseText,
+      clauseType: input.clauseType,
+      orgName: `Org-${input.orgId.slice(0, 8)}`,
+      retrievedTemplates: input.retrievedTemplatesContext || "No comparable templates retrieved.",
+      industrySector: input.industrySector,
+      jurisdiction: input.jurisdiction,
+      clauseText: input.clauseText,
     });
 
     const promptHash = crypto.createHash("sha256").update(systemPrompt).digest("hex");
@@ -167,14 +167,14 @@ const benchmarkClauseTool = createTool({
         temperature: 0,
         response_format: { type: "json_object" },
         messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: `Benchmark clause index ${context.clauseIndex}.` },
-        ],
-      });
-      inputTokens = response.usage?.prompt_tokens ?? 0;
-      outputTokens = response.usage?.completion_tokens ?? 0;
-      result = JSON.parse(response.choices[0]?.message?.content ?? "{}");
-      recordLlmTokens(context.orgId, LLM_MODELS.GPT4O, inputTokens, outputTokens);
+            { role: "system", content: systemPrompt },
+            { role: "user", content: `Benchmark clause index ${input.clauseIndex}.` },
+          ],
+        });
+        inputTokens = response.usage?.prompt_tokens ?? 0;
+        outputTokens = response.usage?.completion_tokens ?? 0;
+        result = JSON.parse(response.choices[0]?.message?.content ?? "{}");
+        recordLlmTokens(input.orgId, LLM_MODELS.GPT4O, inputTokens, outputTokens);
     } catch {
       // Graceful degradation: return global average
       result = {
@@ -208,7 +208,8 @@ const benchmarkClauseTool = createTool({
 
 // ─── Agent ────────────────────────────────────────────────────────────────────
 
-export const benchmarkAgent = new Agent({
+export const benchmarkAgent: Agent = new Agent({
+  id: "benchmark-agent",
   name: "benchmark-agent",
   instructions: `You are the Benchmark Agent in LexGuard AI. Compare legal clauses against industry templates.
 Use benchmark_clause to produce: percentile rank, market position (Above/Standard/Below Market), top 3 comparable templates, delta summary.
@@ -236,31 +237,37 @@ export async function executeBenchmarkAgent(input: BenchmarkAgentInput): Promise
       ),
     ].join("\n");
 
-    const r = await benchmarkClauseTool.execute({
-      context: {
-        clauseType: input.clauseType,
-        clauseIndex: input.clauseIndex,
-        clauseText: input.clauseText,
-        jurisdiction: input.jurisdiction,
-        orgId: input.orgId,
-        retrievedTemplatesContext: templateContext,
-        industrySector: "Commercial",
-      },
-    } as any);
+const r = (await benchmarkClauseTool.execute?.({
+      clauseType: input.clauseType,
+      clauseIndex: input.clauseIndex,
+      clauseText: input.clauseText,
+      jurisdiction: input.jurisdiction,
+      orgId: input.orgId,
+      retrievedTemplatesContext: templateContext,
+      industrySector: "Commercial",
+    }, {} as any)) as any || {};
 
     span.setAttribute("benchmark.percentile", r.percentileRank);
     span.setAttribute("benchmark.market_position", r.marketPosition);
     span.setAttribute("llm.prompt_hash_sha256", r.promptHash);
     span.setAttribute("llm.latency_ms", r.latencyMs);
 
+    const safeTopComparables = Array.isArray(r.topComparables)
+      ? r.topComparables.map((item: any) => ({
+          source: item?.source ?? "Unknown",
+          similarityScore: item?.similarityScore ?? 0,
+          keyDifferences: item?.keyDifferences ?? "",
+        }))
+      : [];
+
     return {
       clauseIndex: input.clauseIndex,
       clauseType: input.clauseType,
-      percentileRank: r.percentileRank,
-      marketPosition: r.marketPosition,
-      topComparables: r.topComparables,
-      deltasSummary: r.deltasSummary,
-      benchmarkLatencyMs: r.latencyMs,
+      percentileRank: r.percentileRank ?? 50,
+      marketPosition: r.marketPosition ?? "Market Standard",
+      topComparables: safeTopComparables,
+      deltasSummary: r.deltasSummary ?? "",
+      benchmarkLatencyMs: r.latencyMs ?? 0,
       modelVersion: LLM_MODELS.GPT4O,
       promptHash: r.promptHash,
     };

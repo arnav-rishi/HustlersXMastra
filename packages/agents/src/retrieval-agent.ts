@@ -119,7 +119,7 @@ const searchQdrantTool = createTool({
     collection: z.string(),
     latencyMs: z.number(),
   }),
-  execute: async ({ context }) => {
+  execute: async (input, context) => {
     const {
       collection,
       clauseText,
@@ -129,7 +129,7 @@ const searchQdrantTool = createTool({
       topK,
       minScore,
       requireOrgScope,
-    } = context;
+    } = input;
 
     const qdrant = getQdrantClient();
 
@@ -186,7 +186,8 @@ const searchQdrantTool = createTool({
 
 // ─── Agent Definition ─────────────────────────────────────────────────────────
 
-export const retrievalAgent = new Agent({
+export const retrievalAgent: Agent = new Agent({
+  id: "retrieval-agent",
   name: "retrieval-agent",
   instructions: `You are the Retrieval Agent in the LexGuard AI legal intelligence platform.
 
@@ -236,19 +237,7 @@ export async function executeRetrievalAgent(
       let coldStart = false;
 
       // ── 1. org_preferences (highest priority, org-scoped) ───────────────────
-      const prefResult = await searchQdrantTool.execute({
-        context: {
-          collection: QDRANT_COLLECTIONS.ORG_PREFERENCES,
-          clauseText: input.clause.clauseText,
-          orgId: input.orgId,
-          tenantId: input.tenantId,
-          jurisdiction: input.jurisdiction,
-          clauseType: input.clause.clauseType ?? "",
-          topK: RETRIEVAL_TOP_K,
-          minScore: RETRIEVAL_MIN_SCORE,
-          requireOrgScope: true,
-        },
-      } as any);
+      const prefResult = (await searchQdrantTool.execute?.({ collection: QDRANT_COLLECTIONS.ORG_PREFERENCES, clauseText: input.clause.clauseText, orgId: input.orgId, tenantId: input.tenantId, jurisdiction: input.jurisdiction, clauseType: input.clause.clauseType ?? "", topK: RETRIEVAL_TOP_K, minScore: RETRIEVAL_MIN_SCORE, requireOrgScope: true }, {} as any)) as any || { results: [], hitCount: 0 };
 
       if (prefResult.hitCount === 0) coldStart = true;
 
@@ -265,19 +254,7 @@ export async function executeRetrievalAgent(
 
       // ── 2. risk_patterns (org-scoped) ──────────────────────────────────────
       if (totalContextTokens < MAX_CONTEXT_TOKENS) {
-        const riskResult = await searchQdrantTool.execute({
-          context: {
-            collection: QDRANT_COLLECTIONS.RISK_PATTERNS,
-            clauseText: input.clause.clauseText,
-            orgId: input.orgId,
-            tenantId: input.tenantId,
-            jurisdiction: input.jurisdiction,
-            clauseType: input.clause.clauseType ?? "",
-            topK: RETRIEVAL_TOP_K,
-            minScore: RETRIEVAL_MIN_SCORE,
-            requireOrgScope: true,
-          },
-        } as any);
+        const riskResult = (await searchQdrantTool.execute?.({ collection: QDRANT_COLLECTIONS.RISK_PATTERNS, clauseText: input.clause.clauseText, orgId: input.orgId, tenantId: input.tenantId, jurisdiction: input.jurisdiction, clauseType: input.clause.clauseType ?? "", topK: RETRIEVAL_TOP_K, minScore: RETRIEVAL_MIN_SCORE, requireOrgScope: true }, {} as any)) as any || { results: [] };
 
         riskResult.results.forEach((r: any) => {
           allResults.push({
@@ -293,19 +270,7 @@ export async function executeRetrievalAgent(
 
       // ── 3. legal_precedents ────────────────────────────────────────────────
       if (totalContextTokens < MAX_CONTEXT_TOKENS) {
-        const precedentResult = await searchQdrantTool.execute({
-          context: {
-            collection: QDRANT_COLLECTIONS.LEGAL_PRECEDENTS,
-            clauseText: input.clause.clauseText,
-            orgId: input.orgId,
-            tenantId: input.tenantId,
-            jurisdiction: input.jurisdiction,
-            clauseType: "",
-            topK: RETRIEVAL_TOP_K,
-            minScore: RETRIEVAL_MIN_SCORE,
-            requireOrgScope: false,
-          },
-        } as any);
+        const precedentResult = (await searchQdrantTool.execute?.({ collection: QDRANT_COLLECTIONS.LEGAL_PRECEDENTS, clauseText: input.clause.clauseText, orgId: input.orgId, tenantId: input.tenantId, jurisdiction: input.jurisdiction, clauseType: "", topK: RETRIEVAL_TOP_K, minScore: RETRIEVAL_MIN_SCORE, requireOrgScope: false }, {} as any)) as any || { results: [] };
 
         precedentResult.results.forEach((r: any) => {
           allResults.push({
@@ -321,19 +286,7 @@ export async function executeRetrievalAgent(
 
       // ── 4. legal_templates (global benchmark) ─────────────────────────────
       if (totalContextTokens < MAX_CONTEXT_TOKENS) {
-        const templateResult = await searchQdrantTool.execute({
-          context: {
-            collection: QDRANT_COLLECTIONS.LEGAL_TEMPLATES,
-            clauseText: input.clause.clauseText,
-            orgId: input.orgId,
-            tenantId: input.tenantId,
-            jurisdiction: input.jurisdiction,
-            clauseType: input.clause.clauseType ?? "",
-            topK: RETRIEVAL_TOP_K,
-            minScore: RETRIEVAL_MIN_SCORE,
-            requireOrgScope: false,
-          },
-        } as any);
+        const templateResult = (await searchQdrantTool.execute?.({ collection: QDRANT_COLLECTIONS.LEGAL_TEMPLATES, clauseText: input.clause.clauseText, orgId: input.orgId, tenantId: input.tenantId, jurisdiction: input.jurisdiction, clauseType: input.clause.clauseType ?? "", topK: RETRIEVAL_TOP_K, minScore: RETRIEVAL_MIN_SCORE, requireOrgScope: false }, {} as any)) as any || { results: [] };
 
         templateResult.results.forEach((r: any) => {
           allResults.push({

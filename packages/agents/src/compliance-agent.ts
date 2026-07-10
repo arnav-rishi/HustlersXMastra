@@ -41,15 +41,15 @@ const checkComplianceTool = createTool({
     findings: z.array(z.object({ regulation: z.string(), section: z.string(), offendingLanguage: z.string(), requiredCorrection: z.string(), severity: z.string() })),
     promptHash: z.string(), inputTokens: z.number(), outputTokens: z.number(), latencyMs: z.number(),
   }),
-  execute: async ({ context }) => {
+  execute: async (input, context) => {
     const env = getEnv();
     const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
-    const prompt = `ROLE: Regulatory Compliance Specialist for ${context.jurisdiction}.
-Check this ${context.clauseType} clause (index ${context.clauseIndex}) against jurisdiction rules.
-RULES: ${context.jurisdictionRulesContext || "None retrieved — mark jurisdictionVerified=false."}
-REGULATORY DOCS: ${context.regulatoryDocsContext || "None retrieved."}
+    const prompt = `ROLE: Regulatory Compliance Specialist for ${input.jurisdiction}.
+Check this ${input.clauseType} clause (index ${input.clauseIndex}) against jurisdiction rules.
+RULES: ${input.jurisdictionRulesContext || "None retrieved — mark jurisdictionVerified=false."}
+REGULATORY DOCS: ${input.regulatoryDocsContext || "None retrieved."}
 RULES: Flag if uncertain. Cite specific regulation+section. GDPR: flag data processing without DPA. CCPA: flag California data without opt-out.
-CLAUSE: ${context.clauseText.slice(0, 800)}
+CLAUSE: ${input.clauseText.slice(0, 800)}
 Return JSON: {"isCompliant":bool,"jurisdictionVerified":bool,"findings":[{"regulation":"...","section":"...","offendingLanguage":"...","requiredCorrection":"...","severity":"Blocking|Warning|Advisory"}]}`;
     const promptHash = crypto.createHash("sha256").update(prompt).digest("hex");
     const start = Date.now();
@@ -62,9 +62,9 @@ Return JSON: {"isCompliant":bool,"jurisdictionVerified":bool,"findings":[{"regul
       inputTokens = response.usage?.prompt_tokens ?? 0;
       outputTokens = response.usage?.completion_tokens ?? 0;
       result = JSON.parse(response.choices[0]?.message?.content ?? "{}");
-      recordLlmTokens(context.orgId, LLM_MODELS.GPT4O, inputTokens, outputTokens);
+      recordLlmTokens(input.orgId, LLM_MODELS.GPT4O, inputTokens, outputTokens);
     } catch {
-      result = { isCompliant: false, jurisdictionVerified: false, findings: [{ regulation: "Unknown", section: "N/A", offendingLanguage: context.clauseText.slice(0, 80), requiredCorrection: "Manual review required", severity: "Warning" }] };
+      result = { isCompliant: false, jurisdictionVerified: false, findings: [{ regulation: "Unknown", section: "N/A", offendingLanguage: input.clauseText.slice(0, 80), requiredCorrection: "Manual review required", severity: "Warning" }] };
     }
     const findings = Array.isArray(result.findings)
       ? result.findings.map((item: any) => ({
@@ -80,7 +80,8 @@ Return JSON: {"isCompliant":bool,"jurisdictionVerified":bool,"findings":[{"regul
   },
 });
 
-export const complianceAgent = new Agent({
+export const complianceAgent: Agent = new Agent({
+  id: "compliance-agent",
   name: "compliance-agent",
   instructions: "Check legal clauses for compliance using check_compliance. Flag if uncertain. Cite specific regulation+section. GDPR/CCPA aware. Escalate to HITL if jurisdictionVerified=false.",
   model: gpt4o,
@@ -94,11 +95,31 @@ export async function executeComplianceAgent(input: ComplianceAgentInput): Promi
   }, async (span) => {
     const rulesCtx = input.jurisdictionRules.map((r) => JSON.stringify(r.payload).slice(0, 250)).join("\n");
     const docsCtx = input.regulatoryDocs.map((d) => JSON.stringify(d.payload).slice(0, 250)).join("\n");
-    const r = await checkComplianceTool.execute({ context: { clauseType: input.clauseType, clauseIndex: input.clauseIndex, clauseText: input.clauseText, jurisdiction: input.jurisdiction, orgId: input.orgId, jurisdictionRulesContext: rulesCtx, regulatoryDocsContext: docsCtx } } as any);
+    const r = (await checkComplianceTool.execute?.({ clauseType: input.clauseType, clauseIndex: input.clauseIndex, clauseText: input.clauseText, jurisdiction: input.jurisdiction, orgId: input.orgId, jurisdictionRulesContext: rulesCtx, regulatoryDocsContext: docsCtx }, {} as any)) as any || {};
     span.setAttribute("compliance.is_compliant", r.isCompliant);
-    span.setAttribute("compliance.finding_count", r.findings.length);
+    span.setAttribute("compliance.finding_count", Array.isArray(r.findings) ? r.findings.length : 0);
     span.setAttribute("llm.prompt_hash_sha256", r.promptHash);
-    const blockingCount = r.findings.filter((f: any) => f.severity === "Blocking").length;
-    return { clauseIndex: input.clauseIndex, isCompliant: r.isCompliant, findings: r.findings, jurisdictionVerified: r.jurisdictionVerified, requiresHitl: !r.isCompliant || !r.jurisdictionVerified || blockingCount > 0, complianceLatencyMs: r.latencyMs, promptHash: r.promptHash };
+
+    const safeFindings = Array.isArray(r.findings)
+      ? r.findings.map((item: any) => ({
+          regulation: item?.regulation ?? "Unknown",
+          section: item?.section ?? "N/A",
+          offendingLanguage: item?.offendingLanguage ?? "",
+          requiredCorrection: item?.requiredCorrection ?? "Manual review required",
+          severity: item?.severity ?? "Warning",
+        }))
+      : [];
+
+    const blockingCount = safeFindings.filter((f: any) => f.severity === "Blocking").length;
+
+    return {
+      clauseIndex: input.clauseIndex,
+      isCompliant: r.isCompliant ?? false,
+      findings: safeFindings,
+      jurisdictionVerified: r.jurisdictionVerified ?? false,
+      requiresHitl: !(r.isCompliant ?? false) || !(r.jurisdictionVerified ?? false) || blockingCount > 0,
+      complianceLatencyMs: r.latencyMs ?? 0,
+      promptHash: r.promptHash,
+    };
   });
 }
