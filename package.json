@@ -23,6 +23,7 @@
     "infra:reset": "docker-compose down -v",
     "infra:logs": "docker-compose logs -f",
     "setup": "pnpm install && pnpm db:generate && pnpm infra:up",
+    "postinstall": "pnpm --filter @lexguard/api run db:generate || true",
     "clean": "turbo run clean && rimraf node_modules **/node_modules"
   },
   "devDependencies": {
