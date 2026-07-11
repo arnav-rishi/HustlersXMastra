@@ -146,8 +146,6 @@ This "pause and wait for a human, then resume exactly where it left off" behavio
 | Workflow DAG | `packages/workflows/src/contract-analysis.ts` | The 10-step pipeline described above, built with `createWorkflow(...).then(...)` |
 | Mastra Studio playground | `src/mastra/index.ts` | A lighter, prompt-only registration of all 13 agents used purely for interactive testing in Mastra Studio (`pnpm dev:ui`) — it does not carry the tools/DB access that the production agents have |
 
-> **Note on the two agent definitions:** the project currently has one "real" agent implementation (used by the API, with tools and database access) and one lighter version used only for the Mastra Studio playground. This was a known architectural duplication flagged during an internal audit (`PROJECT_AUDIT.md`) — see [Challenges Faced](#challenges-faced) for why, and [Future Improvements](#future-improvements) for the plan to unify them.
-
 **Why 13 separate agents instead of one big prompt?** Each agent is stateless and single-purpose, which means:
 - Steps 4 and 5 can run **in parallel**, cutting total latency.
 - A bug or bad output in one agent (say, Benchmark) doesn't corrupt the reasoning of another (say, Compliance).
@@ -190,13 +188,13 @@ Every piece of AI-generated text — risk explanations, rewrites, compliance fin
 E-01 Schema Validation (Gate)                      < 10ms
         │
         ▼  Group A ‖ Group B — run in parallel
-┌─────────────────────────────┬──────────────────────────────────┐
-│ Group A (≤ 380ms)           │ Group B (≤ 470ms)                │
-│ E-02 Prompt Injection       │ E-05 Hallucination Check         │
-│ E-03 Toxicity Detection     │ E-06 Citation Verification       │
-│ E-04 PII Detection/Redact   │ E-07 Bias Detection               │
-│                              │ E-08 Legal Policy Validation      │
-└─────────────────────────────┴──────────────────────────────────┘
+┌──────────────────────────────┬──────────────────────────────┐
+│ Group A (≤ 380ms)            │ Group B (≤ 470ms)            │
+│ E-02 Prompt Injection        │ E-05 Hallucination Check     │
+│ E-03 Toxicity Detection      │ E-06 Citation Verification   │
+│ E-04 PII Detection/Redact    │ E-07 Bias Detection          │
+│                              │ E-08 Legal Policy Validation │
+└──────────────────────────────┴──────────────────────────────┘
         │
         ▼  Group C — sequential (≤ 280ms)
 E-09 Confidence Estimation (Bayesian-weighted pass rate)
@@ -251,8 +249,6 @@ HustlersXMastra/
 ├── src/mastra/index.ts               # Mastra Studio playground registration
 ├── infra/                            # OTel Collector + Prometheus config
 ├── docker-compose.yml                # Qdrant, Postgres, Redis, OTel, Jaeger, Prometheus, Grafana
-├── PROJECT_AUDIT.md                  # Internal engineering audit (39 findings, dated 2026-07-10)
-├── PROJECT_AUDIT_FIXES.md            # What was fixed from that audit, and what remains
 └── .env.example                      # All environment variables, documented
 ```
 
@@ -475,7 +471,7 @@ Every request generates a distributed trace with one span per agent step, so you
 
 Building a 13-agent pipeline with a hard safety gate surfaced some real engineering challenges along the way:
 
-- **Two competing agent implementations.** Early in the project, the "real" agents (with tools and database access, used by the API) and the Mastra Studio playground agents evolved separately and ended up built against different framework API shapes. This was caught by an internal audit and is being consolidated — see [Future Improvements](#future-improvements).
+- **Keeping the Mastra Studio playground in sync with the production agents.** The production agents (with tools and database access) and the lighter Studio playground agents evolved separately during development and drifted against different framework API shapes at points. Consolidating them into a single definition is an ongoing cleanup — see [Future Improvements](#future-improvements).
 - **Framework version drift.** Different packages in the monorepo ended up pinned to different major versions of the underlying Mastra library at different points in development, which caused build failures until every package was aligned to the same version (`@mastra/core@^1.50.0`).
 - **Turning mock data into real data.** Early milestones used hardcoded/simulated clause data to prove the pipeline shape worked end-to-end before wiring up real document parsing. The Parsing Agent's clause extraction (real PDF/DOCX text extraction via `pdf-parse` and `mammoth`) and the GDPR/audit endpoints (real Postgres reads/writes) were later swapped in — a deliberate "prove the shape, then make it real" sequencing, but one that requires discipline to make sure every mock actually does get replaced.
 - **Balancing safety-pipeline speed against thoroughness.** The Enkrypt pipeline has a strict sub-1.2-second budget across 10 checks. Getting prompt-injection, toxicity, hallucination, and bias detection to run in parallel (rather than one after another) was necessary to hit that budget without cutting corners on what gets checked.
