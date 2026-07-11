@@ -80,10 +80,10 @@ vi.mock("@lexguard/observability/metrics", () => ({
 }));
 
 describe("contracts routes", () => {
-  let app: Awaited<typeof import("../src/index")>["app"];
+  let app: Awaited<typeof import("../src/index.js")>["app"];
 
   beforeAll(async () => {
-    app = (await import("../src/index")).app;
+    app = (await import("../src/index.js")).app;
   });
 
   beforeEach(() => {

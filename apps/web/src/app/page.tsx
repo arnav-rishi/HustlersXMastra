@@ -1,7 +1,8 @@
 "use client";
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import Link from "next/link";
 import { API_BASE_URL, getApiHeaders } from "@/lib/api";
+import { downloadCsv } from "@/lib/export";
 
 type DashboardContract = {
   id: string;
@@ -19,6 +20,7 @@ export default function DashboardPage() {
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
   const [recentContracts, setRecentContracts] = useState<DashboardContract[]>([]);
   const [fileInputKey, setFileInputKey] = useState(0);
+  const uploadZoneRef = useRef<HTMLDivElement>(null);
 
   const fetchRecentContracts = useCallback(async () => {
     try {
@@ -87,8 +89,35 @@ export default function DashboardPage() {
           <p className="page-subtitle">Monday, 7 July 2026 · India Standard Time</p>
         </div>
         <div className="flex gap-2">
-          <button className="btn btn-ghost btn-sm">⬇ Export Report</button>
-          <button className="btn btn-primary btn-sm">+ New Analysis</button>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => {
+              if (recentContracts.length === 0) return;
+              downloadCsv(
+                `lexguard-contracts-${new Date().toISOString().slice(0, 10)}.csv`,
+                recentContracts.map((c) => ({
+                  id: c.id,
+                  name: c.name,
+                  type: c.type,
+                  risk: c.risk,
+                  status: c.status,
+                  date: c.date,
+                }))
+              );
+            }}
+            disabled={recentContracts.length === 0}
+          >
+            ⬇ Export Report
+          </button>
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={() => {
+              uploadZoneRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+              document.getElementById("file-input")?.click();
+            }}
+          >
+            + New Analysis
+          </button>
         </div>
       </div>
 
@@ -126,6 +155,7 @@ export default function DashboardPage() {
         <div>
           <div className="section-title">Upload Contract</div>
           <div
+            ref={uploadZoneRef}
             className={`upload-zone ${dragging ? "dragging" : ""}`}
             onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
             onDragLeave={() => setDragging(false)}

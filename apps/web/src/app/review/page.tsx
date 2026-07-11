@@ -2,6 +2,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { API_BASE_URL, getApiHeaders } from "@/lib/api";
+import { downloadCsv } from "@/lib/export";
 
 
 type QueueItem = {
@@ -56,7 +57,28 @@ export default function ReviewQueuePage() {
           <p className="page-subtitle">Contracts flagged for human review · Enkrypt confidence &lt; 0.70</p>
         </div>
         <div className="flex gap-2">
-          <button className="btn btn-ghost btn-sm">⬇ Export Queue</button>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => {
+              if (items.length === 0) return;
+              downloadCsv(
+                `lexguard-hitl-queue-${new Date().toISOString().slice(0, 10)}.csv`,
+                items.map((item) => ({
+                  id: item.id,
+                  contractId: item.contractId,
+                  clauseIndex: item.clauseIndex,
+                  reason: item.reason,
+                  confidenceScore: item.confidenceScore,
+                  status: item.status,
+                  createdAt: item.createdAt,
+                  slaDeadline: item.slaDeadline,
+                }))
+              );
+            }}
+            disabled={items.length === 0}
+          >
+            ⬇ Export Queue
+          </button>
           <div className="tag">{items.length} PENDING</div>
         </div>
       </div>

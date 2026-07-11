@@ -9,17 +9,14 @@ import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
-import OpenAI from "openai";
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
-import { QDRANT_COLLECTIONS, EMBEDDING_MODEL, EMBEDDING_DIMENSIONS, SLA } from "@lexguard/shared/constants";
+import { QDRANT_COLLECTIONS, EMBEDDING_DIMENSIONS, SLA } from "@lexguard/shared/constants";
 import { getQdrantClient } from "@lexguard/qdrant/client";
-import { getEnv } from "@lexguard/shared/env";
-import { gpt4oMini } from "./models";
+import { gpt4oMini, getAzureOpenAIClient, getEmbeddingDeployment } from "./models";
 
 async function embedText(text: string): Promise<number[]> {
-  const env = getEnv();
-  const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
-  const res = await openai.embeddings.create({ model: EMBEDDING_MODEL, input: text, dimensions: EMBEDDING_DIMENSIONS });
+  const openai = getAzureOpenAIClient();
+  const res = await openai.embeddings.create({ model: getEmbeddingDeployment(), input: text, dimensions: EMBEDDING_DIMENSIONS });
   return res.data[0]?.embedding ?? new Array(EMBEDDING_DIMENSIONS).fill(0);
 }
 

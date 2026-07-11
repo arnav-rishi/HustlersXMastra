@@ -21,12 +21,9 @@ import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import crypto from "crypto";
-import OpenAI from "openai";
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
-import { gpt4o } from "./models";
-import { LLM_MODELS } from "@lexguard/shared/constants";
+import { gpt4o, getAzureOpenAIClient, getChatDeployment } from "./models";
 import { recordLlmTokens } from "@lexguard/observability/metrics";
-import { getEnv } from "@lexguard/shared/env";
 import type { RetrievedItem } from "@lexguard/shared/schemas";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -144,8 +141,7 @@ const benchmarkClauseTool = createTool({
     latencyMs: z.number(),
   }),
   execute: async (input, context) => {
-    const env = getEnv();
-    const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+    const openai = getAzureOpenAIClient();
 
     const systemPrompt = buildBenchmarkPrompt({
       clauseType: input.clauseType,
@@ -163,8 +159,7 @@ const benchmarkClauseTool = createTool({
 
     try {
       const response = await openai.chat.completions.create({
-        model: LLM_MODELS.GPT4O,
-        temperature: 0,
+        model: getChatDeployment(),
         response_format: { type: "json_object" },
         messages: [
             { role: "system", content: systemPrompt },
@@ -174,7 +169,7 @@ const benchmarkClauseTool = createTool({
         inputTokens = response.usage?.prompt_tokens ?? 0;
         outputTokens = response.usage?.completion_tokens ?? 0;
         result = JSON.parse(response.choices[0]?.message?.content ?? "{}");
-        recordLlmTokens(input.orgId, LLM_MODELS.GPT4O, inputTokens, outputTokens);
+        recordLlmTokens(input.orgId, getChatDeployment(), inputTokens, outputTokens);
     } catch {
       // Graceful degradation: return global average
       result = {
@@ -268,7 +263,7 @@ const r = (await benchmarkClauseTool.execute?.({
       topComparables: safeTopComparables,
       deltasSummary: r.deltasSummary ?? "",
       benchmarkLatencyMs: r.latencyMs ?? 0,
-      modelVersion: LLM_MODELS.GPT4O,
+      modelVersion: getChatDeployment(),
       promptHash: r.promptHash,
     };
   });

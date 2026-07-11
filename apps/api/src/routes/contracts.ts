@@ -7,9 +7,10 @@
  *   POST   /api/v1/contracts/upload          - Upload and trigger analysis
  *   GET    /api/v1/contracts/:id/analysis    - Retrieve analysis report
  *   GET    /api/v1/contracts/:id/status      - Workflow execution status
- *   POST   /api/v1/qa                        - Legal Q&A
- *   GET    /api/v1/hitl/queue                - HITL review queue
- *   POST   /api/v1/hitl/:id/decision         - Submit HITL decision
+ *   POST   /api/v1/contracts/qa              - Legal Q&A
+ *   GET    /api/v1/contracts/hitl/queue      - HITL review queue
+ *   GET    /api/v1/contracts/hitl/:id        - HITL review item detail
+ *   POST   /api/v1/contracts/hitl/:id/decision - Submit HITL decision
  *   DELETE /api/v1/gdpr/erase/:orgId         - GDPR erasure
  *   GET    /api/v1/audit/trace/:traceId      - OTel trace retrieval
  *
@@ -18,7 +19,7 @@
  *   X-Tenant-ID: <org_id>
  */
 
-import { Router, type Request, type Response } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
 import type { Router as ExpressRouter } from "express";
 import multer from "multer";
 import { z } from "zod";
@@ -34,9 +35,21 @@ import {
   HitlDecisionRequestSchema,
 } from "@lexguard/shared/schemas";
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
+import { getEnv } from "@lexguard/shared/env";
 
 export const contractsRouter: ExpressRouter = Router();
 const prisma = new PrismaClient();
+
+// Wraps an async route handler so a rejected promise (e.g. a Prisma error from
+// a malformed :id) is forwarded to Express's error middleware instead of
+// crashing the process as an unhandled rejection.
+function asyncHandler(
+  fn: (req: Request, res: Response) => Promise<unknown>
+) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    Promise.resolve(fn(req, res)).catch(next);
+  };
+}
 
 function getDocumentTypeFromMime(mimeType: string): "DIGITAL_PDF" | "SCANNED_PDF" | "DOCX" {
   if (mimeType.includes("wordprocessingml")) {
@@ -124,7 +137,7 @@ const upload = multer({
 // ─── POST /api/v1/contracts/upload ───────────────────────────────────────────
 
 contractsRouter.post(
-  "/upload",
+  "/contracts/upload",
   authMiddleware,
   upload.single("contract"),
   async (req: Request, res: Response) => {
@@ -238,7 +251,7 @@ const PaginationQuerySchema = z.object({
 });
 
 contractsRouter.post(
-  "/analyze",
+  "/contracts/analyze",
   authMiddleware,
   async (req: Request, res: Response) => {
     const body = AnalyzeContractBodySchema.safeParse(req.body);
@@ -319,9 +332,9 @@ contractsRouter.post(
 // ─── GET /api/v1/contracts/:id/analysis ──────────────────────────────────────
 
 contractsRouter.get(
-  "/:id/analysis",
+  "/contracts/:id/analysis",
   authMiddleware,
-  async (req: Request, res: Response) => {
+  asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
     const contract = await prisma.contract.findFirst({
       where: {
@@ -351,13 +364,13 @@ contractsRouter.get(
       completedAt: contract.completedAt,
       analysis: contract.analysisJson ?? null,
     });
-  }
+  })
 );
 
 contractsRouter.get(
-  "/:id/report",
+  "/contracts/:id/report",
   authMiddleware,
-  async (req: Request, res: Response) => {
+  asyncHandler(async (req: Request, res: Response) => {
     const contract = await prisma.contract.findFirst({
       where: {
         id: req.params.id,
@@ -389,15 +402,15 @@ contractsRouter.get(
         `attachment; filename="contract-${contract.id}-report.json"`
       )
       .send(JSON.stringify(contract.analysisJson, null, 2));
-  }
+  })
 );
 
 // ─── GET /api/v1/contracts/:id/status ────────────────────────────────────────
 
 contractsRouter.get(
-  "/:id/status",
+  "/contracts/:id/status",
   authMiddleware,
-  async (req: Request, res: Response) => {
+  asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
     const contract = await prisma.contract.findFirst({
       where: {
@@ -428,13 +441,13 @@ contractsRouter.get(
       status: contract.status.toLowerCase(),
       updatedAt: ((contract.completedAt ?? contract.createdAt) ?? new Date()).toISOString(),
     });
-  }
+  })
 );
 
-// ─── POST /api/v1/qa ──────────────────────────────────────────────────────────
+// ─── POST /api/v1/contracts/qa ────────────────────────────────────────────────
 
 contractsRouter.post(
-  "/qa",
+  "/contracts/qa",
   authMiddleware,
   async (req: Request, res: Response) => {
     const bodyResult = QARequestSchema.safeParse({
@@ -468,7 +481,7 @@ contractsRouter.post(
 
 // ─── GET /api/v1/contracts/pending ────────────────────────────────────────────
 
-contractsRouter.get("/pending", authMiddleware, async (req: Request, res: Response) => {
+contractsRouter.get("/contracts/pending", authMiddleware, async (req: Request, res: Response) => {
   try {
     const query = PaginationQuerySchema.parse(req.query);
     const skip = (query.page - 1) * query.pageSize;
@@ -516,13 +529,136 @@ contractsRouter.get("/pending", authMiddleware, async (req: Request, res: Respon
   }
 });
 
-// ─── GET /api/v1/hitl/queue ───────────────────────────────────────────────────
+// ─── GET /api/v1/contracts (repository — all statuses, searchable) ───────────
+
+const ContractsListQuerySchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().positive().max(100).default(25),
+  status: z.string().optional(),
+  search: z.string().optional(),
+});
 
 contractsRouter.get(
-  "/hitl/queue",
+  "/contracts",
+  authMiddleware,
+  asyncHandler(async (req: Request, res: Response) => {
+    const query = ContractsListQuerySchema.parse(req.query);
+    const skip = (query.page - 1) * query.pageSize;
+
+    const where: Prisma.ContractWhereInput = { orgId: req.orgId };
+    if (query.status) {
+      where.status = query.status.toUpperCase() as any;
+    }
+    if (query.search) {
+      where.fileName = { contains: query.search, mode: "insensitive" };
+    }
+
+    const [items, total] = await Promise.all([
+      prisma.contract.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        take: query.pageSize,
+        skip,
+        select: {
+          id: true,
+          fileName: true,
+          documentType: true,
+          status: true,
+          overallRisk: true,
+          jurisdiction: true,
+          createdAt: true,
+          completedAt: true,
+        },
+      }),
+      prisma.contract.count({ where }),
+    ]);
+
+    return res.status(200).json({
+      items: items.map((contract) => ({
+        id: contract.id,
+        name: contract.fileName,
+        type: contract.documentType,
+        status: contract.status.toLowerCase(),
+        risk: contract.overallRisk?.toLowerCase() ?? "unknown",
+        jurisdiction: contract.jurisdiction ?? "Unknown",
+        date: contract.createdAt.toISOString().slice(0, 10),
+        completedAt: contract.completedAt,
+      })),
+      total,
+      page: query.page,
+      pageSize: query.pageSize,
+    });
+  })
+);
+
+// ─── GET /api/v1/analytics/summary ────────────────────────────────────────────
+
+contractsRouter.get(
+  "/analytics/summary",
+  authMiddleware,
+  asyncHandler(async (req: Request, res: Response) => {
+    const orgId = req.orgId;
+
+    const [totalContracts, statusGroups, riskGroups, hitlPending, hitlDecided, completedContracts] =
+      await Promise.all([
+        prisma.contract.count({ where: { orgId } }),
+        prisma.contract.groupBy({ by: ["status"], where: { orgId }, _count: true }),
+        prisma.contract.groupBy({
+          by: ["overallRisk"],
+          where: { orgId, overallRisk: { not: null } },
+          _count: true,
+        }),
+        prisma.hitlQueueItem.count({ where: { orgId, status: "PENDING" } }),
+        prisma.hitlQueueItem.count({ where: { orgId, status: "DECIDED" } }),
+        prisma.contract.findMany({
+          where: { orgId, status: "COMPLETED" },
+          select: { analysisJson: true, createdAt: true, completedAt: true },
+        }),
+      ]);
+
+    const statusCounts: Record<string, number> = {};
+    for (const g of statusGroups) statusCounts[g.status.toLowerCase()] = g._count;
+
+    const riskCounts: Record<string, number> = { critical: 0, moderate: 0, low: 0 };
+    for (const g of riskGroups) {
+      if (g.overallRisk) riskCounts[g.overallRisk.toLowerCase()] = g._count;
+    }
+
+    let compliantCount = 0;
+    let totalLatencyMs = 0;
+    let latencySamples = 0;
+    for (const c of completedContracts) {
+      const analysis = c.analysisJson as any;
+      const flags = Array.isArray(analysis?.jurisdictionFlags) ? analysis.jurisdictionFlags : [];
+      if (flags.length === 0) compliantCount++;
+      if (c.completedAt && c.createdAt) {
+        totalLatencyMs += c.completedAt.getTime() - c.createdAt.getTime();
+        latencySamples++;
+      }
+    }
+    const complianceRate =
+      completedContracts.length > 0 ? (compliantCount / completedContracts.length) * 100 : null;
+    const avgProcessingMs = latencySamples > 0 ? Math.round(totalLatencyMs / latencySamples) : null;
+
+    return res.status(200).json({
+      totalContracts,
+      statusCounts,
+      riskCounts,
+      hitl: { pending: hitlPending, decided: hitlDecided },
+      complianceRatePct: complianceRate === null ? null : Math.round(complianceRate * 10) / 10,
+      avgProcessingMs,
+      completedCount: completedContracts.length,
+    });
+  })
+);
+
+// ─── GET /api/v1/contracts/hitl/queue ─────────────────────────────────────────
+
+contractsRouter.get(
+  "/contracts/hitl/queue",
   authMiddleware,
   requireRole("legal_counsel"),
-  async (req: Request, res: Response) => {
+  asyncHandler(async (req: Request, res: Response) => {
     const query = PaginationQuerySchema.parse(req.query);
     const skip = (query.page - 1) * query.pageSize;
     const items = await prisma.hitlQueueItem.findMany({
@@ -562,14 +698,14 @@ contractsRouter.get(
       pageSize: query.pageSize,
       orgId: req.orgId,
     });
-  }
+  })
 );
 
 contractsRouter.get(
-  "/hitl/:id",
+  "/contracts/hitl/:id",
   authMiddleware,
   requireRole("legal_counsel"),
-  async (req: Request, res: Response) => {
+  asyncHandler(async (req: Request, res: Response) => {
     const item = await prisma.hitlQueueItem.findFirst({
       where: {
         id: req.params.id,
@@ -601,16 +737,16 @@ contractsRouter.get(
       reason: item.reason.toLowerCase(),
       status: item.status.toLowerCase(),
     });
-  }
+  })
 );
 
-// ─── POST /api/v1/hitl/:id/decision ──────────────────────────────────────────
+// ─── POST /api/v1/contracts/hitl/:id/decision ─────────────────────────────────
 
 contractsRouter.post(
-  "/hitl/:id/decision",
+  "/contracts/hitl/:id/decision",
   authMiddleware,
   requireRole("legal_counsel"),
-  async (req: Request, res: Response) => {
+  asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
 
     const bodyResult = HitlDecisionRequestSchema.safeParse({
@@ -711,7 +847,7 @@ contractsRouter.post(
       memoryCollectionsUpdated: memoryResult.collectionsUpdated,
       message: "HITL decision recorded. Workflow resuming.",
     });
-  }
+  })
 );
 
 // ─── DELETE /api/v1/gdpr/erase/:orgId ────────────────────────────────────────
@@ -770,9 +906,9 @@ contractsRouter.get(
 // Returns per-stage workflow timing rows for readiness dashboarding.
 
 contractsRouter.get(
-  "/:id/metrics",
+  "/contracts/:id/metrics",
   authMiddleware,
-  async (req: Request, res: Response) => {
+  asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
 
     const contract = await prisma.contract.findFirst({
@@ -804,5 +940,55 @@ contractsRouter.get(
       stages: metrics,
       totalStages: metrics.length,
     });
-  }
+  })
+);
+
+// ─── GET /api/v1/settings ─────────────────────────────────────────────────────
+
+contractsRouter.get(
+  "/settings",
+  authMiddleware,
+  asyncHandler(async (req: Request, res: Response) => {
+    const env = getEnv();
+
+    const organization = await prisma.organization.findUnique({
+      where: { id: req.orgId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        plan: true,
+        awsRegion: true,
+        citationLimit: true,
+        rateLimitRpm: true,
+        createdAt: true,
+      },
+    });
+
+    if (!organization) {
+      return res.status(404).json({
+        error: "NOT_FOUND",
+        message: "Organization not found",
+      });
+    }
+
+    return res.status(200).json({
+      organization,
+      user: {
+        id: req.user?.sub,
+        email: req.user?.email,
+        roles: req.user?.roles ?? [],
+      },
+      featureFlags: {
+        enkryptEnabled: env.ENKRYPT_ENABLED,
+        lexisNexisEnabled: env.LEXISNEXIS_ENABLED,
+        hitlEnabled: env.HITL_ENABLED,
+      },
+      azure: {
+        chatDeployment: env.AZURE_OPENAI_DEPLOYMENT,
+        chatDeploymentMini: env.AZURE_OPENAI_DEPLOYMENT_MINI || env.AZURE_OPENAI_DEPLOYMENT,
+        embeddingDeploymentConfigured: Boolean(env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT),
+      },
+    });
+  })
 );

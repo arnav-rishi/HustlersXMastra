@@ -1,5 +1,8 @@
 process.env.NODE_ENV = "test";
 process.env.OPENAI_API_KEY = "test-key";
+process.env.AZURE_OPENAI_API_KEY = "test-key";
+process.env.AZURE_OPENAI_ENDPOINT = "https://test-resource.openai.azure.com";
+process.env.AZURE_OPENAI_DEPLOYMENT = "test-deployment";
 process.env.DATABASE_URL =
   "postgresql://lexguard:password@localhost:5432/lexguard_db?schema=public";
 process.env.REDIS_URL = "redis://localhost:6379";

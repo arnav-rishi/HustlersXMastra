@@ -50,28 +50,29 @@ async function initializeCollections(): Promise<void> {
 
     const exists = await client.collectionExists(name);
 
-    if (exists) {
-      console.log(`⏭️  Skipping "${name}" — already exists`);
-      skipped++;
-      continue;
-    }
-
     try {
-      console.log(`🔨 Creating collection: "${name}"...`);
-      await client.createCollection(name, config);
+      if (exists) {
+        console.log(`⏭️  Skipping "${name}" — already exists`);
+        skipped++;
+      } else {
+        console.log(`🔨 Creating collection: "${name}"...`);
+        await client.createCollection(name, config);
+        created++;
+      }
 
-      // Create payload indexes for fast filtered search
+      // Ensure payload indexes exist (idempotent — also runs for
+      // pre-existing collections, since indexes may be missing on those).
       const indexes = PAYLOAD_INDEXES[name] ?? [];
       for (const { field, type } of indexes) {
         console.log(`   📇 Indexing payload field: ${field} (${type})`);
-        // Note: payload index creation via REST API
-        // In production, use Qdrant's createPayloadIndex method
+        await client.createPayloadIndex(name, field, type);
       }
 
-      console.log(`   ✅ Created "${name}" with ${indexes.length} payload indexes`);
-      created++;
+      if (!exists) {
+        console.log(`   ✅ Created "${name}" with ${indexes.length} payload indexes`);
+      }
     } catch (err) {
-      console.error(`   ❌ Failed to create "${name}":`, err);
+      console.error(`   ❌ Failed to initialize "${name}":`, err);
       throw err;
     }
   }

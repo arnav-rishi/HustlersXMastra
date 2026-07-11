@@ -2,12 +2,14 @@
   "name": "@lexguard/enkrypt",
   "version": "1.0.0",
   "private": true,
-  "main": "./src/pipeline.ts",
+  "main": "./dist/pipeline.js",
+  "types": "./dist/pipeline.d.ts",
   "exports": {
-    "./pipeline": "./src/pipeline.ts"
+    "./pipeline": { "types": "./dist/pipeline.d.ts", "development": "./src/pipeline.ts", "default": "./dist/pipeline.js" }
   },
   "scripts": {
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "@lexguard/shared": "workspace:*",

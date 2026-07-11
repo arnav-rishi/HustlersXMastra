@@ -2,14 +2,16 @@
   "name": "@lexguard/shared",
   "version": "1.0.0",
   "private": true,
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    "./schemas": "./src/schemas/index.ts",
-    "./env": "./src/env.ts",
-    "./constants": "./src/constants.ts"
+    "./schemas": { "types": "./dist/schemas/index.d.ts", "development": "./src/schemas/index.ts", "default": "./dist/schemas/index.js" },
+    "./env": { "types": "./dist/env.d.ts", "development": "./src/env.ts", "default": "./dist/env.js" },
+    "./constants": { "types": "./dist/constants.d.ts", "development": "./src/constants.ts", "default": "./dist/constants.js" }
   },
   "scripts": {
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "zod": "^3.23.0"

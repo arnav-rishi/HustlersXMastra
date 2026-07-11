@@ -92,8 +92,9 @@ async function withRetry<T>(
       if (attempt < RETRY.MAX_ATTEMPTS) {
         const delay = RETRY.BASE_DELAY_MS * Math.pow(2, attempt - 1);
         const jitter = Math.random() * 500;
+        const detail = (err as any)?.data ?? (err as any)?.response?.data;
         console.warn(
-          `[LexGuard][Qdrant] ${operationName} attempt ${attempt} failed. Retrying in ${delay + jitter}ms...`
+          `[LexGuard][Qdrant] ${operationName} attempt ${attempt} failed: ${lastError.message}${detail ? " detail=" + JSON.stringify(detail) : ""}. Retrying in ${delay + jitter}ms...`
         );
         await new Promise((resolve) => setTimeout(resolve, delay + jitter));
       }
@@ -135,10 +136,17 @@ export class LexGuardQdrantClient {
   ): Promise<void> {
     const start = Date.now();
 
+    // All 8 collections are created with a named "dense" vector (see
+    // packages/qdrant/src/collections.ts), so a plain vector array must be
+    // wrapped accordingly — Qdrant rejects unnamed vectors for such collections.
+    const namedPoints = points.map((p: any) =>
+      Array.isArray(p.vector) ? { ...p, vector: { dense: p.vector } } : p
+    );
+
     await withRetry(async () => {
       await this.client.upsert(collection, {
         wait: true,
-        points,
+        points: namedPoints,
       });
     }, `upsert:${collection}`);
 
@@ -163,9 +171,9 @@ export class LexGuardQdrantClient {
     const start = Date.now();
 
     const results = await withRetry(async () => {
-      // Named vector search supporting hybrid mode
+      // Named vector search — collections are created with a "dense" named vector
       return await this.client.search(collection, {
-        vector: denseVector,
+        vector: { name: "dense", vector: denseVector },
         filter,
         limit: topK,
         score_threshold: scoreThreshold,
@@ -198,7 +206,7 @@ export class LexGuardQdrantClient {
   ): Promise<Array<{ id: string | number; score: number; payload: Record<string, unknown> }>> {
     const results = await withRetry(async () => {
       return await this.client.search(collection, {
-        vector,
+        vector: { name: "dense", vector },
         filter,
         limit: topK,
         score_threshold: scoreThreshold,
@@ -242,6 +250,17 @@ export class LexGuardQdrantClient {
 
   async createCollection(name: string, config: UpsertCollection): Promise<void> {
     await this.client.createCollection(name, config);
+  }
+
+  async createPayloadIndex(
+    collection: string,
+    field: string,
+    schemaType: string
+  ): Promise<void> {
+    await this.client.createPayloadIndex(collection, {
+      field_name: field,
+      field_schema: schemaType as any,
+    });
   }
 
   async getCollections(): Promise<string[]> {

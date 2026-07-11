@@ -21,8 +21,7 @@
 import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import { gpt4oMini } from "./models";
-import OpenAI from "openai";
+import { gpt4oMini, getAzureOpenAIClient, getChatDeploymentMini } from "./models";
 import {
   type ClassificationAgentInput,
   type ClassificationAgentOutput,
@@ -31,8 +30,7 @@ import {
   ClassifiedClauseSchema,
 } from "@lexguard/shared/schemas";
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
-import { CLAUSE_TYPES, LLM_MODELS } from "@lexguard/shared/constants";
-import { getEnv } from "@lexguard/shared/env";
+import { CLAUSE_TYPES } from "@lexguard/shared/constants";
 
 // ─── Classifier Helpers ────────────────────────────────────────────────────────
 
@@ -91,14 +89,12 @@ const classifyClauseLlmTool = createTool({
   }),
   execute: async (input, context) => {
     const { clauseText, clauseIndex } = input;
-    const env = getEnv();
-    const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+    const openai = getAzureOpenAIClient();
 
     const allowedTypes = CLAUSE_TYPES.join(", ");
 
     const response = await openai.chat.completions.create({
-      model: LLM_MODELS.GPT4O_MINI,
-      temperature: 0,
+      model: getChatDeploymentMini(),
       response_format: { type: "json_object" },
       messages: [
         {

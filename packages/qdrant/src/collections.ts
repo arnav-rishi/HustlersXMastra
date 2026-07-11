@@ -213,10 +213,13 @@ export const PAYLOAD_INDEXES: Record<string, Array<{ field: string; type: string
     { field: "org_id", type: "keyword" },
     { field: "clause_type", type: "keyword" },
     { field: "risk_level", type: "keyword" },
+    { field: "jurisdiction", type: "keyword" },
   ],
   [QDRANT_COLLECTIONS.ORG_PREFERENCES]: [
     { field: "org_id", type: "keyword" },
     { field: "preference_type", type: "keyword" },
+    { field: "jurisdiction", type: "keyword" },
+    { field: "clause_type", type: "keyword" },
   ],
   [QDRANT_COLLECTIONS.CONVERSATION_MEMORY]: [
     { field: "session_id", type: "keyword" },

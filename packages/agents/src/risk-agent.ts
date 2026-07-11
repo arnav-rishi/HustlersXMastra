@@ -23,9 +23,8 @@
 import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import { gpt4o } from "./models";
+import { gpt4o, getAzureOpenAIClient, getChatDeployment } from "./models";
 import crypto from "crypto";
-import OpenAI from "openai";
 import {
   type RiskAgentInput,
   type RiskAgentOutput,
@@ -34,11 +33,9 @@ import {
 } from "@lexguard/shared/schemas";
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
 import {
-  LLM_MODELS,
   RISK_SEVERITY,
 } from "@lexguard/shared/constants";
 import { recordLlmTokens } from "@lexguard/observability/metrics";
-import { getEnv } from "@lexguard/shared/env";
 
 // ─── CRISPE Prompt Builder ────────────────────────────────────────────────────
 // Per PRD Appendix A.1 — Risk Analysis Agent system prompt
@@ -140,8 +137,7 @@ const analyzeClauseRiskTool = createTool({
     hasUncertainty: z.boolean(),
   }),
   execute: async (input, context) => {
-    const env = getEnv();
-    const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+    const openai = getAzureOpenAIClient();
 
     const systemPrompt = buildRiskAnalysisPrompt({
       clauseType: input.clauseType,
@@ -168,8 +164,7 @@ const analyzeClauseRiskTool = createTool({
 
     try {
       const response = await openai.chat.completions.create({
-        model: LLM_MODELS.GPT4O,
-        temperature: 0.1,
+        model: getChatDeployment(),
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: systemPrompt },
@@ -187,7 +182,7 @@ const analyzeClauseRiskTool = createTool({
       riskReport = JSON.parse(content);
       riskReport.clauseIndex = input.clauseIndex;
       riskReport.promptHash = promptHash;
-      riskReport.modelVersion = LLM_MODELS.GPT4O;
+      riskReport.modelVersion = getChatDeployment();
 
     } catch (err) {
       hasUncertainty = true;
@@ -205,19 +200,19 @@ const analyzeClauseRiskTool = createTool({
         overallRisk: RISK_SEVERITY.MODERATE,
         chainOfThought: "Analysis incomplete due to service error.",
         promptHash,
-        modelVersion: LLM_MODELS.GPT4O,
+        modelVersion: getChatDeployment(),
       };
     }
 
     const latencyMs = Date.now() - start;
 
     // Record LLM token usage for cost tracking
-    recordLlmTokens(input.orgId, LLM_MODELS.GPT4O, inputTokens, outputTokens);
+    recordLlmTokens(input.orgId, getChatDeployment(), inputTokens, outputTokens);
 
     return {
       riskReport,
       promptHash,
-      modelVersion: LLM_MODELS.GPT4O,
+      modelVersion: getChatDeployment(),
       inputTokens,
       outputTokens,
       latencyMs,
@@ -262,7 +257,7 @@ export async function executeRiskAgent(
       "lexguard.org_id": input.orgId,
       "lexguard.contract_id": input.contractId,
       "lexguard.agent_id": "risk-analysis-agent",
-      "llm.model": LLM_MODELS.GPT4O,
+      "llm.model": getChatDeployment(),
       "clause.type": input.clause.clauseType ?? "unknown",
       "clause.index": input.clause.clauseIndex,
     },

@@ -7,13 +7,10 @@ import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import crypto from "crypto";
-import OpenAI from "openai";
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
-import { LLM_MODELS } from "@lexguard/shared/constants";
 import { recordLlmTokens } from "@lexguard/observability/metrics";
-import { getEnv } from "@lexguard/shared/env";
 import type { RetrievedItem } from "@lexguard/shared/schemas";
-import { gpt4o } from "./models";
+import { gpt4o, getAzureOpenAIClient, getChatDeployment } from "./models";
 
 export interface ComplianceAgentInput {
   contractId: string; orgId: string; jurisdiction: string;
@@ -42,8 +39,7 @@ const checkComplianceTool = createTool({
     promptHash: z.string(), inputTokens: z.number(), outputTokens: z.number(), latencyMs: z.number(),
   }),
   execute: async (input, context) => {
-    const env = getEnv();
-    const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+    const openai = getAzureOpenAIClient();
     const prompt = `ROLE: Regulatory Compliance Specialist for ${input.jurisdiction}.
 Check this ${input.clauseType} clause (index ${input.clauseIndex}) against jurisdiction rules.
 RULES: ${input.jurisdictionRulesContext || "None retrieved — mark jurisdictionVerified=false."}
@@ -56,13 +52,13 @@ Return JSON: {"isCompliant":bool,"jurisdictionVerified":bool,"findings":[{"regul
     let result: any = null; let inputTokens = 0, outputTokens = 0;
     try {
       const response = await openai.chat.completions.create({
-        model: LLM_MODELS.GPT4O, temperature: 0, response_format: { type: "json_object" },
+        model: getChatDeployment(), response_format: { type: "json_object" },
         messages: [{ role: "system", content: prompt }, { role: "user", content: "Check compliance now." }],
       });
       inputTokens = response.usage?.prompt_tokens ?? 0;
       outputTokens = response.usage?.completion_tokens ?? 0;
       result = JSON.parse(response.choices[0]?.message?.content ?? "{}");
-      recordLlmTokens(input.orgId, LLM_MODELS.GPT4O, inputTokens, outputTokens);
+      recordLlmTokens(input.orgId, getChatDeployment(), inputTokens, outputTokens);
     } catch {
       result = { isCompliant: false, jurisdictionVerified: false, findings: [{ regulation: "Unknown", section: "N/A", offendingLanguage: input.clauseText.slice(0, 80), requiredCorrection: "Manual review required", severity: "Warning" }] };
     }

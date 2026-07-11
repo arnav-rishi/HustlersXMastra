@@ -2,13 +2,15 @@
   "name": "@lexguard/observability",
   "version": "1.0.0",
   "private": true,
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    "./tracer": "./src/tracer.ts",
-    "./metrics": "./src/metrics.ts"
+    "./tracer": { "types": "./dist/tracer.d.ts", "development": "./src/tracer.ts", "default": "./dist/tracer.js" },
+    "./metrics": { "types": "./dist/metrics.d.ts", "development": "./src/metrics.ts", "default": "./dist/metrics.js" }
   },
   "scripts": {
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
