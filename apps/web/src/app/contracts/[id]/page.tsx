@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { API_BASE_URL, getApiHeaders } from "@/lib/api";
 
 type Risk = {
@@ -68,11 +69,31 @@ const riskClass = (risk: string | undefined) =>
   risk === "Critical" ? "high" : risk === "Moderate" ? "medium" : "low";
 
 export default function ContractDetailPage({ params }: { params: { id: string } }) {
+  const router = useRouter();
   const [data, setData] = useState<ContractAnalysisResponse | null>(null);
   const [statusData, setStatusData] = useState<ContractStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeClause, setActiveClause] = useState(0);
+  const [deleting, setDeleting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const deleteContract = useCallback(async () => {
+    if (!window.confirm("Permanently delete this contract? This removes all clauses, embeddings, and HITL history. This cannot be undone.")) {
+      return;
+    }
+    setDeleting(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/contracts/${params.id}`, {
+        method: "DELETE",
+        headers: getApiHeaders(),
+      });
+      if (!res.ok) throw new Error("Delete failed");
+      router.push("/contracts");
+    } catch {
+      setError("Failed to delete this contract. Check API and retry.");
+      setDeleting(false);
+    }
+  }, [params.id, router]);
 
   const fetchAnalysis = useCallback(async (): Promise<ContractAnalysisResponse | null> => {
     try {
@@ -165,6 +186,14 @@ export default function ContractDetailPage({ params }: { params: { id: string } 
             ) : null}
           </div>
         </div>
+        <button
+          className="btn btn-ghost btn-sm"
+          style={{ color: "var(--risk-high)" }}
+          onClick={deleteContract}
+          disabled={deleting}
+        >
+          🗑 {deleting ? "Deleting…" : "Delete Contract"}
+        </button>
       </div>
 
       {inProgress ? (

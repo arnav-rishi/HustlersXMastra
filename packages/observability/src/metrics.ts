@@ -4,12 +4,18 @@
  * Exports all Prometheus metrics defined in PRD v2.0 Section 14.2.
  * Alert thresholds are defined as comments alongside each metric.
  *
- * Metrics are automatically exposed via /metrics endpoint in the API.
+ * Metrics are pushed via OTLP (not pulled from an in-process /metrics route)
+ * to the OTel Collector every 15s, which re-exposes them in Prometheus format
+ * on its own :8888/metrics endpoint. Prometheus scrapes the collector, not
+ * the API directly — see infra/otel/collector-config.yml's "prometheus"
+ * exporter and infra/prometheus/prometheus.yml's "otel-collector" job.
  */
 
 import {
   MeterProvider,
   PeriodicExportingMetricReader,
+  View,
+  ExplicitBucketHistogramAggregation,
 } from "@opentelemetry/sdk-metrics";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import {
@@ -63,6 +69,18 @@ export function initMetrics(): void {
       new PeriodicExportingMetricReader({
         exporter,
         exportIntervalMillis: 15_000,
+      }),
+    ],
+    views: [
+      // Default OTel histogram buckets top out at 10s, but a full 13-agent
+      // pipeline run legitimately takes 30-180s — without wider buckets every
+      // real observation falls in the +Inf bucket and P95 queries are useless.
+      new View({
+        instrumentName: "lexguard_contract_analysis_latency_p95",
+        aggregation: new ExplicitBucketHistogramAggregation([
+          1_000, 2_500, 5_000, 10_000, 15_000, 20_000, 30_000, 45_000, 60_000,
+          90_000, 120_000, 180_000, 300_000,
+        ]),
       }),
     ],
   });

@@ -46,21 +46,26 @@ import {
   ParsingAgentOutputSchema,
   EmbeddingAgentOutputSchema,
 } from "@lexguard/shared/schemas";
-import { executeDocumentAgent } from "@lexguard/agents/document-agent";
-import { executeParsingAgent } from "@lexguard/agents/parsing-agent";
-import { executeEmbeddingAgent } from "@lexguard/agents/embedding-agent";
-import { executeClassificationAgent } from "@lexguard/agents/classification-agent";
-import { executeRetrievalAgent } from "@lexguard/agents/retrieval-agent";
-import { executeRiskAgent } from "@lexguard/agents/risk-agent";
-import { executeBenchmarkAgent } from "@lexguard/agents/benchmark-agent";
-import { executeRewriteAgent } from "@lexguard/agents/rewrite-agent";
-import { executeComplianceAgent } from "@lexguard/agents/compliance-agent";
-import { executeEvaluationAgent } from "@lexguard/agents/evaluation-agent";
-import { executeReportingAgent } from "@lexguard/agents/reporting-agent";
+import { executeDocumentAgent, documentAgent } from "@lexguard/agents/document-agent";
+import { executeParsingAgent, parsingAgent } from "@lexguard/agents/parsing-agent";
+import { executeEmbeddingAgent, embeddingAgent } from "@lexguard/agents/embedding-agent";
+import { executeClassificationAgent, classificationAgent } from "@lexguard/agents/classification-agent";
+import { executeRetrievalAgent, retrievalAgent } from "@lexguard/agents/retrieval-agent";
+import { executeRiskAgent, riskAgent } from "@lexguard/agents/risk-agent";
+import { executeBenchmarkAgent, benchmarkAgent } from "@lexguard/agents/benchmark-agent";
+import { executeRewriteAgent, rewriteAgent } from "@lexguard/agents/rewrite-agent";
+import { executeComplianceAgent, complianceAgent } from "@lexguard/agents/compliance-agent";
+import { executeEvaluationAgent, evaluationAgent } from "@lexguard/agents/evaluation-agent";
+import { executeReportingAgent, reportingAgent } from "@lexguard/agents/reporting-agent";
+import { qaAgent } from "@lexguard/agents/qa-agent";
+import { memoryAgent } from "@lexguard/agents/memory-agent";
 import {
   withSpan,
   OTEL_SPAN_NAMES,
 } from "@lexguard/observability/tracer";
+import { recordContractAnalysisLatency } from "@lexguard/observability/metrics";
+import { MastraOtelBridgeExporter } from "@lexguard/observability/mastra-bridge";
+import { Observability, SamplingStrategyType } from "@mastra/observability";
 import { v4 as uuidv4 } from "uuid";
 
 // ─── Shared Prisma Instance (reused across workflow steps) ───────────────────
@@ -93,6 +98,29 @@ function progressPctForStageStart(stageName: string): number {
   const idx = STAGE_ORDER.indexOf(stageName);
   if (idx === -1) return 0;
   return Math.round((idx / STAGE_ORDER.length) * 100);
+}
+
+// Interpolates progress within a single stage's slice of the overall bar (e.g.
+// embedding's batch loop moves the bar from 20% toward 30% instead of sitting
+// frozen at 20% for the whole stage, which is what made slow/hung embedding
+// calls look identical to a stuck pipeline).
+function makeSubStageProgressReporter(contractId: string, stageName: string) {
+  const base = progressPctForStageStart(stageName);
+  const nextIdx = STAGE_ORDER.indexOf(stageName) + 1;
+  const next =
+    nextIdx < STAGE_ORDER.length
+      ? Math.round((nextIdx / STAGE_ORDER.length) * 100)
+      : 100;
+
+  return (unitsDone: number, totalUnits: number) => {
+    const frac = totalUnits > 0 ? Math.min(unitsDone / totalUnits, 1) : 1;
+    const pct = Math.round(base + frac * (next - base));
+    prisma.contract
+      .update({ where: { id: contractId }, data: { progressPct: pct } })
+      .catch((e: any) =>
+        console.warn(`[LexGuard][Workflow] Sub-stage progress update failed (${stageName}):`, e)
+      );
+  };
 }
 
 async function recordStageMetric<T>(
@@ -165,6 +193,13 @@ const WorkflowInputSchema = z.object({
   spanId: z.string(),
   // workflowId threaded through init data so steps can write metrics
   workflowId: z.string().optional(),
+  // The actual contract text to analyze. Required for real (non-mock) parsing
+  // since S3 blob storage isn't implemented in this deployment.
+  contractText: z.string().optional(),
+  // Wall-clock start (Date.now()) set by triggerContractAnalysis, used by the
+  // reporting step to compute end-to-end pipeline latency for the
+  // lexguard_contract_analysis_latency_p95 metric.
+  workflowStartedAt: z.number().optional(),
 });
 
 type WorkflowInput = z.infer<typeof WorkflowInputSchema>;
@@ -204,6 +239,7 @@ const documentValidationStep = createStep({
         orgId: inputData.orgId,
         tenantId: inputData.tenantId,
         uploadedBy: inputData.uploadedBy,
+        rawText: inputData.contractText,
       })
     );
   },
@@ -231,6 +267,7 @@ const parsingStep = createStep({
         orgId: initData.orgId,
         documentType: inputData.documentType,
         s3Key: inputData.s3Key,
+        rawText: inputData.rawText,
       })
     );
   },
@@ -247,19 +284,22 @@ const embeddingStep = createStep({
     const initData = getInitData<WorkflowInput>();
     const wfId = initData.workflowId ?? "unknown";
     return recordStageMetric(inputData.contractId, wfId, "embedding", () =>
-      executeEmbeddingAgent({
-        otel: {
-          traceId: initData.traceId,
-          spanId: initData.spanId,
-          orgId: initData.orgId,
+      executeEmbeddingAgent(
+        {
+          otel: {
+            traceId: initData.traceId,
+            spanId: initData.spanId,
+            orgId: initData.orgId,
+            contractId: inputData.contractId,
+          },
           contractId: inputData.contractId,
+          orgId: initData.orgId,
+          tenantId: initData.tenantId,
+          jurisdiction: initData.jurisdiction ?? "Unknown",
+          clauses: inputData.clauses,
         },
-        contractId: inputData.contractId,
-        orgId: initData.orgId,
-        tenantId: initData.tenantId,
-        jurisdiction: initData.jurisdiction ?? "Unknown",
-        clauses: inputData.clauses,
-      })
+        makeSubStageProgressReporter(inputData.contractId, "embedding")
+      )
     );
   },
 });
@@ -768,6 +808,10 @@ const reportingStep = createStep({
         },
       });
 
+      if (initData.workflowStartedAt) {
+        recordContractAnalysisLatency(Date.now() - initData.workflowStartedAt);
+      }
+
       return {
         contractId: inputData.contractId,
         reportId: report.reportId,
@@ -797,11 +841,56 @@ export const contractAnalysisWorkflow = createWorkflow({
   .commit();
 
 // ─── Mastra Instance ──────────────────────────────────────────────────────────
+//
+// Wires Mastra's native tracing (agent runs, tool calls, model generations,
+// workflow steps — previously a silent no-op, see mastra-bridge.ts) into the
+// same Jaeger backend the hand-instrumented OTel spans already use, via
+// MastraOtelBridgeExporter. sensitiveDataFilter defaults to true, so secrets
+// (API keys, tokens) are redacted before spans ever reach the exporter.
+//
+// All 13 agents are registered here (not just the ones this workflow calls
+// directly) via Agent#__registerMastra — this is what actually ties an
+// agent's generate()/generateLegacy() calls into the Observability context;
+// an unregistered Agent silently produces no tracing spans even when driven
+// for real (confirmed: document-agent already called generateLegacy() before
+// this change and never emitted a span until registration was added).
 
 export const mastra: Mastra = new Mastra({
   workflows: {
     "contract-analysis": contractAnalysisWorkflow,
   },
+  agents: {
+    documentAgent,
+    parsingAgent,
+    embeddingAgent,
+    classificationAgent,
+    retrievalAgent,
+    riskAgent,
+    benchmarkAgent,
+    rewriteAgent,
+    complianceAgent,
+    evaluationAgent,
+    reportingAgent,
+    qaAgent,
+    memoryAgent,
+  },
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: "lexguard-mastra",
+        sampling: { type: SamplingStrategyType.ALWAYS },
+        // Cast: pnpm resolves @mastra/core to more than one physical instance
+        // across this monorepo (root package.json pins zod@^4 for the Mastra
+        // CLI/Studio tooling while every workspace package uses zod@^3.x,
+        // which splits the peer-dependency graph). MastraOtelBridgeExporter's
+        // ObservabilityExporter type is therefore nominally — not
+        // structurally — incompatible with the instance Observability()
+        // resolves here, purely a TS identity artifact. Verified this exporter
+        // works correctly at runtime (real spans reach Jaeger).
+        exporters: [new MastraOtelBridgeExporter()] as any,
+      },
+    },
+  }),
 });
 
 // ─── Workflow Trigger ─────────────────────────────────────────────────────────
@@ -819,6 +908,7 @@ export interface TriggerContractAnalysisParams {
   priority?: "standard" | "urgent";
   traceId: string;
   spanId: string;
+  contractText?: string;
 }
 
 /**
@@ -855,6 +945,7 @@ export async function triggerContractAnalysis(
             jurisdiction: params.jurisdiction ?? "Unknown",
             priority: params.priority ?? "standard",
             workflowId,
+            workflowStartedAt: Date.now(),
           },
         })
         .catch(async (err: unknown) => {

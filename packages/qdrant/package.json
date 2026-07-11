@@ -17,7 +17,7 @@
   "dependencies": {
     "@qdrant/js-client-rest": "^1.10.0",
     "@lexguard/shared": "workspace:*",
-    "zod": "^3.23.0"
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "typescript": "^5.4.5",

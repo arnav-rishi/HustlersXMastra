@@ -23,6 +23,8 @@ export default function ContractsPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
   const pageSize = 15;
 
   const load = useCallback(async () => {
@@ -51,6 +53,88 @@ export default function ContractsPage() {
     void load();
   }, [load]);
 
+  const toggleSelected = useCallback((id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleSelectAll = useCallback(() => {
+    setSelected((prev) => (prev.size === items.length ? new Set() : new Set(items.map((c) => c.id))));
+  }, [items]);
+
+  const deleteOne = useCallback(async (id: string, name: string) => {
+    if (!window.confirm(`Permanently delete "${name}"? This removes the contract, its clauses, embeddings, and HITL history. This cannot be undone.`)) {
+      return;
+    }
+    setDeleting(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/contracts/${id}`, {
+        method: "DELETE",
+        headers: getApiHeaders(),
+      });
+      if (!response.ok) throw new Error("Delete failed");
+      setSelected((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      await load();
+    } catch {
+      setError("Failed to delete contract. Check API and retry.");
+    } finally {
+      setDeleting(false);
+    }
+  }, [load]);
+
+  const deleteSelected = useCallback(async () => {
+    if (selected.size === 0) return;
+    if (!window.confirm(`Permanently delete ${selected.size} selected contract(s)? This removes all clauses, embeddings, and HITL history. This cannot be undone.`)) {
+      return;
+    }
+    setDeleting(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/contracts`, {
+        method: "DELETE",
+        headers: getApiHeaders(true),
+        body: JSON.stringify({ ids: Array.from(selected) }),
+      });
+      if (!response.ok) throw new Error("Bulk delete failed");
+      setSelected(new Set());
+      await load();
+    } catch {
+      setError("Failed to delete selected contracts. Check API and retry.");
+    } finally {
+      setDeleting(false);
+    }
+  }, [selected, load]);
+
+  const deleteAll = useCallback(async () => {
+    if (total === 0) return;
+    if (!window.confirm(`Permanently delete ALL ${total} contract(s) in the repository? This removes every clause, embedding, and HITL record. This cannot be undone.`)) {
+      return;
+    }
+    setDeleting(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/contracts`, {
+        method: "DELETE",
+        headers: getApiHeaders(true),
+        body: JSON.stringify({ all: true }),
+      });
+      if (!response.ok) throw new Error("Delete all failed");
+      setSelected(new Set());
+      setPage(1);
+      await load();
+    } catch {
+      setError("Failed to delete all contracts. Check API and retry.");
+    } finally {
+      setDeleting(false);
+    }
+  }, [total, load]);
+
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   return (
@@ -61,6 +145,24 @@ export default function ContractsPage() {
           <p className="page-subtitle">View and search all processed legal documents</p>
         </div>
         <div className="flex gap-2">
+          {selected.size > 0 ? (
+            <button
+              className="btn btn-ghost btn-sm"
+              style={{ color: "var(--risk-high)" }}
+              onClick={deleteSelected}
+              disabled={deleting}
+            >
+              🗑 Delete Selected ({selected.size})
+            </button>
+          ) : null}
+          <button
+            className="btn btn-ghost btn-sm"
+            style={{ color: "var(--risk-high)" }}
+            onClick={deleteAll}
+            disabled={deleting || total === 0}
+          >
+            🗑 Delete All
+          </button>
           <button
             className="btn btn-ghost btn-sm"
             onClick={() =>
@@ -119,17 +221,28 @@ export default function ContractsPage() {
         <table>
           <thead>
             <tr>
+              <th style={{ width: 32 }}>
+                <input
+                  type="checkbox"
+                  checked={items.length > 0 && selected.size === items.length}
+                  onChange={toggleSelectAll}
+                />
+              </th>
               <th>Contract</th>
               <th>Type</th>
               <th>Jurisdiction</th>
               <th>Risk</th>
               <th>Status</th>
               <th>Date</th>
+              <th style={{ width: 40 }} />
             </tr>
           </thead>
           <tbody>
             {items.map((c) => (
               <tr key={c.id}>
+                <td>
+                  <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleSelected(c.id)} />
+                </td>
                 <td>
                   <Link href={`/contracts/${c.id}`} style={{ color: "var(--text-primary)" }}>
                     <div style={{ maxWidth: 280 }} className="truncate">
@@ -153,11 +266,22 @@ export default function ContractsPage() {
                   </span>
                 </td>
                 <td style={{ color: "var(--text-secondary)" }}>{c.date}</td>
+                <td>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    style={{ color: "var(--risk-high)", padding: "2px 8px" }}
+                    onClick={() => deleteOne(c.id, c.name)}
+                    disabled={deleting}
+                    title="Delete permanently"
+                  >
+                    🗑
+                  </button>
+                </td>
               </tr>
             ))}
             {items.length === 0 ? (
               <tr>
-                <td colSpan={6} style={{ color: "var(--text-muted)" }}>
+                <td colSpan={8} style={{ color: "var(--text-muted)" }}>
                   {error ?? "No contracts found. Upload one from the Dashboard to get started."}
                 </td>
               </tr>

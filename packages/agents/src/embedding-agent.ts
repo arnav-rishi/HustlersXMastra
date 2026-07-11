@@ -43,6 +43,39 @@ import { getQdrantClient } from "@lexguard/qdrant/client";
 // ─── Tools ───────────────────────────────────────────────────────────────────
 
 /**
+ * Retries a single embedding batch call with exponential backoff, matching the
+ * failure behavior documented at the top of this file (which previously wasn't
+ * implemented — the call was a bare, un-retried `await`). Each attempt is also
+ * bounded by RETRY.STEP_TIMEOUT_MS so a slow/hung Azure call can't silently
+ * block the workflow for the OpenAI SDK's default 10-minute timeout.
+ */
+async function withEmbeddingRetry<T>(
+  fn: () => Promise<T>,
+  operationName: string
+): Promise<T> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= RETRY.MAX_ATTEMPTS; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+
+      if (attempt < RETRY.MAX_ATTEMPTS) {
+        const delay = RETRY.BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        const jitter = Math.random() * 500;
+        console.warn(
+          `[LexGuard][EmbeddingAgent] ${operationName} attempt ${attempt} failed: ${lastError.message}. Retrying in ${delay + jitter}ms...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay + jitter));
+      }
+    }
+  }
+
+  throw lastError ?? new Error(`[LexGuard][EmbeddingAgent] ${operationName} failed`);
+}
+
+/**
  * Tool: generate_embeddings
  * Batches clauses and generates embeddings via the Azure OpenAI embedding deployment.
  * Max batch size: 100 (OpenAI API limit).
@@ -63,24 +96,44 @@ const generateEmbeddingsTool = createTool({
     const { texts } = input;
     const openai: AzureOpenAI = getAzureOpenAIClient();
     const model = getEmbeddingDeployment();
+    const onBatchComplete = (context as any)?.onBatchComplete as
+      | ((batchesDone: number, totalBatches: number) => void)
+      | undefined;
 
     // Process in batches of 100
     const BATCH_SIZE = 100;
+    const totalBatches = Math.max(1, Math.ceil(texts.length / BATCH_SIZE));
     const allEmbeddings: number[][] = [];
     let totalTokens = 0;
 
     for (let i = 0; i < texts.length; i += BATCH_SIZE) {
       const batch = texts.slice(i, i + BATCH_SIZE);
+      const batchNum = i / BATCH_SIZE + 1;
 
-      const response = await openai.embeddings.create({
-        model: model,
-        input: batch,
-        encoding_format: "float",
-        dimensions: EMBEDDING_DIMENSIONS,
-      });
+      const response = await withEmbeddingRetry(
+        () =>
+          openai.embeddings.create(
+            {
+              model: model,
+              input: batch,
+              encoding_format: "float",
+              dimensions: EMBEDDING_DIMENSIONS,
+            },
+            // Per-call override: bound this batch to STEP_TIMEOUT_MS instead of
+            // inheriting the SDK's 10-minute default, and let our own retry loop
+            // above own the retry/backoff instead of the SDK's silent internal retries.
+            { timeout: RETRY.STEP_TIMEOUT_MS, maxRetries: 0 }
+          ),
+        `embed_batch:${batchNum}/${totalBatches}`
+      );
 
       allEmbeddings.push(...response.data.map((d) => d.embedding));
       totalTokens += response.usage.total_tokens;
+
+      console.log(
+        `[LexGuard][EmbeddingAgent] embedded batch ${batchNum}/${totalBatches} (${allEmbeddings.length}/${texts.length} clauses)`
+      );
+      onBatchComplete?.(batchNum, totalBatches);
     }
 
     return {
@@ -216,7 +269,8 @@ CRITICAL:
 // ─── Agent Executor ───────────────────────────────────────────────────────────
 
 export async function executeEmbeddingAgent(
-  input: EmbeddingAgentInput
+  input: EmbeddingAgentInput,
+  onProgress?: (batchesDone: number, totalBatches: number) => void
 ): Promise<EmbeddingAgentOutput> {
   return withSpan(
     OTEL_SPAN_NAMES.AGENT_EMBEDDING_EXECUTE,
@@ -237,7 +291,7 @@ export async function executeEmbeddingAgent(
 
       // Step 1: Generate embeddings for all clause texts
       const texts = input.clauses.map((c) => c.clauseText);
-      const embeddingResult = (await generateEmbeddingsTool.execute?.({ texts }, {} as any)) as any || { embeddings: [], model: getEmbeddingDeployment(), totalTokens: 0 };
+      const embeddingResult = (await generateEmbeddingsTool.execute?.({ texts }, { onBatchComplete: onProgress } as any)) as any || { embeddings: [], model: getEmbeddingDeployment(), totalTokens: 0 };
 
       // Step 2: Upsert to Qdrant with full metadata
       const upsertResult = (await upsertToQdrantTool.execute?.({ contractId: input.contractId, orgId: input.orgId, tenantId: input.tenantId, jurisdiction: input.jurisdiction, clauses: input.clauses.map((c) => ({ clauseIndex: c.clauseIndex, clauseType: c.clauseType, clauseText: c.clauseText, pageNumber: c.pageNumber, boundingBox: c.boundingBox })), embeddings: embeddingResult.embeddings }, {} as any)) as any || { upsertedCount: 0, chunkIds: [], upsertLatencyMs: 0 };

@@ -4,7 +4,19 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".next/**"]
+      "outputs": ["dist/**", ".next/**"],
+      // Turbo 2's default envMode is "strict": child processes (and the cache
+      // key) only see env vars declared here. Without this, `next build`
+      // silently ran with these unset — the Next.js rewrite proxy target and
+      // all NEXT_PUBLIC_* client vars were baked in empty/default instead of
+      // the real build-arg values (found while validating the web Dockerfile).
+      "env": [
+        "API_INTERNAL_URL",
+        "NEXT_PUBLIC_API_BASE_URL",
+        "NEXT_PUBLIC_QDRANT_DASHBOARD_URL",
+        "NEXT_PUBLIC_DEV_TENANT_ID",
+        "NEXT_PUBLIC_DEV_AUTH_TOKEN"
+      ]
     },
     "dev": {
       "cache": false,

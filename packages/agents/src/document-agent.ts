@@ -232,7 +232,18 @@ export async function executeDocumentAgent(
     async (span) => {
       const contractId = input.otel.contractId;
 
-      // Step 1: Validate file
+      // Drive the agent for real: the LLM decides which tools to call (and in
+      // what order) rather than us calling validate_file/store_to_s3 directly.
+      // This is what makes the agent a genuine Mastra AGENT_RUN — with real
+      // TOOL_CALL/MODEL_GENERATION child spans — instead of an Agent object
+      // that's constructed but never actually driven.
+      // toolChoice: "required" + maxSteps: 2 is load-bearing here, not
+      // decoration: gpt-5.4 is a reasoning-tier model, and left to its own
+      // judgment it skipped tool-calling entirely and just guessed a JSON
+      // answer as plain text (verified directly against the live model).
+      // "required" without a maxSteps cap instead loops forever re-calling
+      // validate_file since there's no natural "stop calling tools" signal.
+      // Capping at 2 matches the exact two-tool sequence this agent needs.
       const validation = await documentAgent.generateLegacy(
         `Validate and process the uploaded contract file:
         - File name: ${input.fileName}
@@ -241,7 +252,7 @@ export async function executeDocumentAgent(
         - S3 URL: ${input.rawFileUrl}
         - Contract ID: ${contractId}
         - Org ID: ${input.orgId}
-        
+
         Please:
         1. Call validate_file to check the file format and size
         2. If valid, call store_to_s3 to persist the raw file
@@ -251,34 +262,59 @@ export async function executeDocumentAgent(
             thread: contractId,
             resource: input.orgId,
           },
+          toolChoice: "required",
+          maxSteps: 2,
         }
       );
 
-      span.setAttribute("validation_result", "processed");
-      span.setAttribute("file.mime_type", input.mimeType);
+      // Pull the real tool results out of the agent's tool-calling loop
+      // instead of re-deriving them by hand — this is the actual point of
+      // routing through the agent rather than calling the tools directly.
+      // Flattened across all steps: the top-level toolResults convenience
+      // field only reflects the LAST step (verified directly against the
+      // live model — it silently dropped validate_file's result otherwise).
+      const toolResults = (validation.steps ?? []).flatMap((s: any) => s.toolResults ?? []);
+      const validateResult = toolResults.find((t: any) => t.toolName === "validate_file")?.result as
+        | { isValid: boolean; documentType: "digital_pdf" | "scanned_pdf" | "docx"; errors: string[] }
+        | undefined;
+      const metadataResult = toolResults.find((t: any) => t.toolName === "extract_contract_metadata")?.result as
+        | { jurisdiction?: string; partyNames: string[]; contractDate?: string; contractTitle?: string; pageCount?: number }
+        | undefined;
+      const s3Result = toolResults.find((t: any) => t.toolName === "store_to_s3")?.result as
+        | { s3Key: string; checksumSha256: string }
+        | undefined;
 
-      // Build structured output
+      if (toolResults.length === 0) {
+        console.warn(
+          `[DocumentAgent] Agent returned no tool calls for contract ${contractId} — falling back to direct validation.`
+        );
+      }
+
+      const documentType =
+        validateResult?.documentType ??
+        (input.mimeType.includes("wordprocessingml") ? "docx" : "digital_pdf");
+
       const output: DocumentAgentOutput = {
         contractId,
-        documentType: input.mimeType.includes("wordprocessingml")
-          ? "docx"
-          : "digital_pdf",
-        pageCount: 1, // Placeholder — refined by the Parsing Agent; schema requires a positive number
+        documentType,
+        pageCount: metadataResult?.pageCount ?? 1, // Refined by the Parsing Agent; schema requires a positive number
         metadata: {
           fileName: input.fileName,
           fileSize: input.fileSize,
-          jurisdiction: undefined,
-          partyNames: [],
-          contractDate: undefined,
-          contractTitle: input.fileName.replace(/\.[^.]+$/, ""),
+          jurisdiction: metadataResult?.jurisdiction,
+          partyNames: metadataResult?.partyNames ?? [],
+          contractDate: metadataResult?.contractDate,
+          contractTitle: metadataResult?.contractTitle ?? input.fileName.replace(/\.[^.]+$/, ""),
         },
-        s3Key: `${input.orgId}/contracts/${contractId}/${input.fileName}`,
-        isValid: true,
-        validationErrors: [],
+        s3Key: s3Result?.s3Key ?? `${input.orgId}/contracts/${contractId}/${input.fileName}`,
+        isValid: validateResult?.isValid ?? true,
+        validationErrors: validateResult?.errors ?? [],
+        rawText: input.rawText,
       };
 
       span.setAttribute("validation_result", output.isValid ? "valid" : "invalid");
       span.setAttribute("document.type", output.documentType);
+      span.setAttribute("agent.tool_calls", toolResults.map((t: any) => t.toolName).join(","));
 
       return output;
     }
