@@ -24,6 +24,10 @@ import type { Router as ExpressRouter } from "express";
 import multer from "multer";
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
+import fs from "fs";
+import path from "path";
+import os from "os";
+import { pathToFileURL } from "url";
 import { authMiddleware, requireRole } from "../middleware/auth";
 import { triggerContractAnalysis } from "@lexguard/workflows/contract-analysis";
 import { executeQAAgent } from "@lexguard/agents/qa-agent";
@@ -39,6 +43,13 @@ import { getEnv } from "@lexguard/shared/env";
 
 export const contractsRouter: ExpressRouter = Router();
 const prisma = new PrismaClient();
+
+// Local dev storage shim: in production, contract files upload to S3 with
+// SSE-KMS (see store_to_s3 in document-agent.ts). Locally, there's no S3, so
+// we persist the real uploaded bytes to a temp directory and pass a file://
+// URL through the pipeline — this is what lets the Parsing Agent read and
+// analyze the ACTUAL uploaded document instead of mock data.
+const LOCAL_UPLOAD_DIR = path.join(os.tmpdir(), "lexguard-uploads");
 
 // Wraps an async route handler so a rejected promise (e.g. a Prisma error from
 // a malformed :id) is forwarded to Express's error middleware instead of
@@ -59,6 +70,7 @@ function getDocumentTypeFromMime(mimeType: string): "DIGITAL_PDF" | "SCANNED_PDF
 }
 
 async function createQueuedContract(params: {
+  id: string;
   orgId: string;
   uploadedBy: string;
   fileName: string;
@@ -69,6 +81,7 @@ async function createQueuedContract(params: {
 }) {
   return prisma.contract.create({
     data: {
+      id: params.id,
       orgId: params.orgId,
       uploadedBy: params.uploadedBy,
       fileName: params.fileName,
@@ -166,11 +179,21 @@ contractsRouter.post(
         });
       }
 
-      // In production: upload file buffer to S3, get pre-signed URL
-      const s3Key = `${req.orgId}/${uuidv4()}/${req.file.originalname}`;
-      const rawFileUrl = `https://${process.env.S3_BUCKET_NAME}.s3.amazonaws.com/${s3Key}`;
+      // In production: upload file buffer to S3, get pre-signed URL.
+      // Locally: persist the real bytes to disk so downstream agents can
+      // actually read and analyze the uploaded document (see LOCAL_UPLOAD_DIR
+      // comment above) instead of operating on hardcoded mock content.
+      const contractId = uuidv4();
+      const localDir = path.join(LOCAL_UPLOAD_DIR, req.orgId!, contractId);
+      fs.mkdirSync(localDir, { recursive: true });
+      const localFilePath = path.join(localDir, req.file.originalname);
+      fs.writeFileSync(localFilePath, req.file.buffer);
+
+      const s3Key = localFilePath;
+      const rawFileUrl = pathToFileURL(localFilePath).href;
 
       const createdContract = await createQueuedContract({
+        id: contractId,
         orgId: req.orgId!,
         uploadedBy: req.user!.sub,
         fileName: req.file.originalname,
@@ -181,7 +204,7 @@ contractsRouter.post(
       });
 
       // Trigger the Mastra contract analysis workflow
-      const { workflowId, contractId } = await triggerContractAnalysis({
+      const { workflowId } = await triggerContractAnalysis({
         contractId: createdContract.id,
         orgId: req.orgId!,
         tenantId: req.tenantId!,

@@ -22,6 +22,7 @@ import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import crypto from "crypto";
+import { fileURLToPath } from "url";
 import { gpt4oMini } from "./models";
 import {
   DocumentAgentInputSchema,
@@ -257,6 +258,20 @@ export async function executeDocumentAgent(
       span.setAttribute("validation_result", "processed");
       span.setAttribute("file.mime_type", input.mimeType);
 
+      // Resolve the real storage locator for downstream agents (Parsing Agent
+      // reads from this to analyze the ACTUAL uploaded document). In local
+      // dev, rawFileUrl is a file:// URL written by the upload route (see
+      // apps/api/src/routes/contracts.ts LOCAL_UPLOAD_DIR); in production
+      // this would instead be an S3 key from a real store_to_s3 call.
+      let s3Key: string;
+      try {
+        s3Key = input.rawFileUrl.startsWith("file://")
+          ? fileURLToPath(input.rawFileUrl)
+          : `${input.orgId}/contracts/${contractId}/${input.fileName}`;
+      } catch {
+        s3Key = `${input.orgId}/contracts/${contractId}/${input.fileName}`;
+      }
+
       // Build structured output
       const output: DocumentAgentOutput = {
         contractId,
@@ -272,7 +287,7 @@ export async function executeDocumentAgent(
           contractDate: undefined,
           contractTitle: input.fileName.replace(/\.[^.]+$/, ""),
         },
-        s3Key: `${input.orgId}/contracts/${contractId}/${input.fileName}`,
+        s3Key,
         isValid: true,
         validationErrors: [],
       };
