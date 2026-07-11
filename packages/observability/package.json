@@ -5,24 +5,39 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    "./tracer": { "types": "./dist/tracer.d.ts", "development": "./src/tracer.ts", "default": "./dist/tracer.js" },
-    "./metrics": { "types": "./dist/metrics.d.ts", "development": "./src/metrics.ts", "default": "./dist/metrics.js" }
+    "./tracer": {
+      "types": "./dist/tracer.d.ts",
+      "development": "./src/tracer.ts",
+      "default": "./dist/tracer.js"
+    },
+    "./metrics": {
+      "types": "./dist/metrics.d.ts",
+      "development": "./src/metrics.ts",
+      "default": "./dist/metrics.js"
+    },
+    "./mastra-bridge": {
+      "types": "./dist/mastra-bridge.d.ts",
+      "development": "./src/mastra-bridge.ts",
+      "default": "./dist/mastra-bridge.js"
+    }
   },
   "scripts": {
     "type-check": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
+    "@lexguard/shared": "workspace:*",
+    "@mastra/core": "^1.50.0",
+    "@mastra/observability": "1.16.0",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/core": "^1.25.0",
-    "@opentelemetry/sdk-node": "^0.52.0",
-    "@opentelemetry/sdk-metrics": "^1.25.0",
-    "@opentelemetry/sdk-trace-node": "^1.25.0",
-    "@opentelemetry/resources": "^1.25.0",
-    "@opentelemetry/semantic-conventions": "^1.25.0",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.52.0",
     "@opentelemetry/exporter-metrics-otlp-http": "^0.52.0",
-    "@lexguard/shared": "workspace:*"
+    "@opentelemetry/exporter-trace-otlp-http": "^0.52.0",
+    "@opentelemetry/resources": "^1.25.0",
+    "@opentelemetry/sdk-metrics": "^1.25.0",
+    "@opentelemetry/sdk-node": "^0.52.0",
+    "@opentelemetry/sdk-trace-node": "^1.25.0",
+    "@opentelemetry/semantic-conventions": "^1.25.0"
   },
   "devDependencies": {
     "typescript": "^5.4.5"

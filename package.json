@@ -28,6 +28,7 @@
   },
   "devDependencies": {
     "@ai-sdk/azure": "^1.1.0",
+    "@lexguard/agents": "workspace:*",
     "@mastra/core": "^1.50.0",
     "mastra": "^1.18.0",
     "zod": "^4.0.0",

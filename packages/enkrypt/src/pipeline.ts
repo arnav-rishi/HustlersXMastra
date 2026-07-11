@@ -20,6 +20,7 @@ import type { EnkryptValidationResult } from "@lexguard/shared/schemas";
 import { ENKRYPT_CONFIDENCE_THRESHOLD, ENKRYPT_LATENCY } from "@lexguard/shared/constants";
 import { recordEnkryptResult } from "@lexguard/observability/metrics";
 import { getEnv } from "@lexguard/shared/env";
+import { enkryptDetect, type EnkryptDetectResponse } from "./client";
 
 // ─── Stage Result Helper ──────────────────────────────────────────────────────
 
@@ -38,9 +39,24 @@ function validateSchema(output: unknown): { pass: boolean; validated: Record<str
 
 // ─── Group A Stages (Parallel) ────────────────────────────────────────────────
 
-// E-02: Prompt Injection Detection (<80ms)
-async function detectPromptInjection(text: string): Promise<{ pass: boolean; injectionType?: string; latencyMs: number }> {
+// E-02: Prompt Injection Detection (<80ms) — Enkrypt Guardrails `injection_attack`
+// detector when available, local regex heuristics as fallback (disabled/unreachable).
+async function detectPromptInjection(
+  text: string,
+  apiResult: EnkryptDetectResponse | null
+): Promise<{ pass: boolean; injectionType?: string; latencyMs: number; source: "enkrypt_api" | "local" }> {
   const start = Date.now();
+
+  if (apiResult) {
+    const flagged = apiResult.summary.injection_attack === 1;
+    return {
+      pass: !flagged,
+      injectionType: flagged ? "enkrypt:injection_attack" : undefined,
+      latencyMs: Date.now() - start,
+      source: "enkrypt_api",
+    };
+  }
+
   const INJECTION_PATTERNS = [
     /ignore (all |previous |above )?instructions/i,
     /you are now/i,
@@ -52,20 +68,53 @@ async function detectPromptInjection(text: string): Promise<{ pass: boolean; inj
     /\[INST\]/,
   ];
   const matched = INJECTION_PATTERNS.find((p) => p.test(text));
-  return { pass: !matched, injectionType: matched ? matched.source : undefined, latencyMs: Date.now() - start };
+  return {
+    pass: !matched,
+    injectionType: matched ? matched.source : undefined,
+    latencyMs: Date.now() - start,
+    source: "local",
+  };
 }
 
-// E-03: Toxicity Detection (<150ms)
-async function detectToxicity(text: string): Promise<{ pass: boolean; score: number; latencyMs: number }> {
+// E-03: Toxicity Detection (<150ms) — Enkrypt Guardrails `toxicity` detector when
+// available, local keyword heuristic as fallback.
+async function detectToxicity(
+  text: string,
+  apiResult: EnkryptDetectResponse | null
+): Promise<{ pass: boolean; score: number; latencyMs: number; source: "enkrypt_api" | "local" }> {
   const start = Date.now();
+
+  if (apiResult) {
+    // Confirmed against the live API: summary.toxicity is an array of flagged
+    // category names (empty when clean), not a 0/1 flag like pii/bias.
+    // details.toxicity holds per-category float scores keyed by category name
+    // (HATE, HARASSMENT, ILLICIT_BEHAVIOR, SELF_HARM, VIOLENCE_THREATS) —
+    // there is no single "toxicity" key.
+    const summaryToxicity = apiResult.summary.toxicity;
+    const flagged = Array.isArray(summaryToxicity) && summaryToxicity.length > 0;
+    const detail = apiResult.details?.toxicity as Record<string, unknown> | undefined;
+    const CATEGORY_KEYS = ["HATE", "HARASSMENT", "ILLICIT_BEHAVIOR", "SELF_HARM", "VIOLENCE_THREATS"];
+    const categoryScores = detail
+      ? CATEGORY_KEYS.map((k) => Number(detail[k])).filter((n) => Number.isFinite(n))
+      : [];
+    const score = categoryScores.length > 0 ? Math.max(...categoryScores) : flagged ? 1 : 0;
+    return { pass: !flagged, score, latencyMs: Date.now() - start, source: "enkrypt_api" };
+  }
+
   const TOXIC_TERMS = ["hate", "harass", "threaten", "discriminat", "slur"];
   const lower = text.toLowerCase();
   const score = TOXIC_TERMS.filter((t) => lower.includes(t)).length / TOXIC_TERMS.length;
-  return { pass: score < 0.3, score, latencyMs: Date.now() - start };
+  return { pass: score < 0.3, score, latencyMs: Date.now() - start, source: "local" };
 }
 
-// E-04: PII Detection & Redaction (<120ms)
-async function detectAndRedactPii(text: string): Promise<{ redactedText: string; piiEntities: string[]; meaningChanged: boolean; latencyMs: number }> {
+// E-04: PII Detection & Redaction (<120ms) — actual redaction always runs locally
+// (Enkrypt's redacted-text field isn't part of the confirmed response contract),
+// but when the Enkrypt Guardrails `pii` detector flags content our regexes missed,
+// that's surfaced rather than silently dropped.
+async function detectAndRedactPii(
+  text: string,
+  apiResult: EnkryptDetectResponse | null
+): Promise<{ redactedText: string; piiEntities: string[]; meaningChanged: boolean; latencyMs: number }> {
   const start = Date.now();
   const PII_PATTERNS: Array<{ name: string; regex: RegExp; replacement: string }> = [
     { name: "SSN", regex: /\b\d{3}-\d{2}-\d{4}\b/g, replacement: "[SSN_REDACTED]" },
@@ -85,6 +134,10 @@ async function detectAndRedactPii(text: string): Promise<{ redactedText: string;
       // Check if redaction removes key legal terms
       if (name === "email" && text.includes("notice")) meaningChanged = true;
     }
+  }
+
+  if (apiResult?.summary.pii === 1 && piiEntities.length === 0) {
+    piiEntities.push("enkrypt_pii_detected_unredacted");
   }
 
   return { redactedText, piiEntities, meaningChanged, latencyMs: Date.now() - start };
@@ -133,9 +186,19 @@ async function verifyCitations(outputText: string): Promise<{ verified: boolean;
   return { verified: unverifiedCitations.length === 0, unverifiedCitations, latencyMs: Date.now() - start };
 }
 
-// E-07: Bias Detection (<100ms)
-async function detectBias(text: string): Promise<{ pass: boolean; biasCategory?: string; latencyMs: number }> {
+// E-07: Bias Detection (<100ms) — Enkrypt Guardrails `bias` detector when
+// available, local keyword heuristic as fallback.
+async function detectBias(
+  text: string,
+  apiResult: EnkryptDetectResponse | null
+): Promise<{ pass: boolean; biasCategory?: string; latencyMs: number }> {
   const start = Date.now();
+
+  if (apiResult) {
+    const flagged = apiResult.summary.bias === 1;
+    return { pass: !flagged, biasCategory: flagged ? "enkrypt:bias_detected" : undefined, latencyMs: Date.now() - start };
+  }
+
   const PROTECTED_CLASS_TERMS = ["gender", "race", "religion", "disability", "national origin", "age", "sexual orientation"];
   const lower = text.toLowerCase();
   const found = PROTECTED_CLASS_TERMS.find((term) => {
@@ -232,6 +295,21 @@ export async function runEnkryptPipeline(input: EnkryptPipelineInput): Promise<E
   const groupAStart = Date.now();
   const groupBStart = Date.now();
 
+  // Two real Enkrypt Guardrails calls (one per text blob, multiple detectors
+  // batched per call), run once and shared across the stages below — this
+  // keeps the pipeline at 2 external round trips instead of 4, so it fits
+  // the ENKRYPT_LATENCY budget even with the network hop included. Each
+  // resolves to null (never throws) if Enkrypt is disabled/unreachable,
+  // and every consuming stage below falls back to local heuristics in that case.
+  const [injectionApiResult, outputApiResult] = await Promise.all([
+    enkryptDetect(input.inputText, { injection_attack: { enabled: true } }),
+    enkryptDetect(input.outputText, {
+      toxicity: { enabled: true },
+      pii: { enabled: true, entities: ["pii", "secrets", "ip_address", "url"] },
+      bias: { enabled: true },
+    }),
+  ]);
+
   const [
     injectionResult,
     toxicityResult,
@@ -241,17 +319,18 @@ export async function runEnkryptPipeline(input: EnkryptPipelineInput): Promise<E
     biasResult,
     policyResult,
   ] = await Promise.all([
-    detectPromptInjection(input.inputText),
-    detectToxicity(input.outputText),
-    detectAndRedactPii(input.outputText),
+    detectPromptInjection(input.inputText, injectionApiResult),
+    detectToxicity(input.outputText, outputApiResult),
+    detectAndRedactPii(input.outputText, outputApiResult),
     detectHallucination(input.outputText, input.retrievedContext ?? ""),
     verifyCitations(input.outputText),
-    detectBias(input.outputText),
+    detectBias(input.outputText, outputApiResult),
     validateLegalPolicy(input.outputText, input.jurisdiction ?? ""),
   ]);
 
   const groupALatencyMs = Date.now() - groupAStart;
   const groupBLatencyMs = Date.now() - groupBStart;
+  const enkryptApiSource = injectionApiResult || outputApiResult ? "enkrypt_api" : "local_fallback";
 
   // Stage results
   stageResults.push(stageResult(2, "A", injectionResult.pass, injectionResult.latencyMs, injectionResult.pass ? [] : [`injection:${injectionResult.injectionType}`]));
@@ -276,7 +355,7 @@ export async function runEnkryptPipeline(input: EnkryptPipelineInput): Promise<E
   const groupBPass = [hallucinationResult.pass, citationResult.verified, biasResult.pass, policyResult.pass];
   const confidenceScore = estimateConfidence(groupAPass, groupBPass);
 
-  stageResults.push(stageResult(9, "C", true, 10, [], { confidence_score: confidenceScore }));
+  stageResults.push(stageResult(9, "C", true, 10, [], { confidence_score: confidenceScore, detection_source: enkryptApiSource }));
 
   // E-10: Safe output generation
   const safeOutput = generateSafeOutput(

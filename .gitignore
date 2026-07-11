@@ -12,3 +12,6 @@ apps/api/keys/*.pem
 *.log
 .DS_Store
 Thumbs.db
+*.tsbuildinfo
+type_check_output*.txt
+workflows_typecheck.txt

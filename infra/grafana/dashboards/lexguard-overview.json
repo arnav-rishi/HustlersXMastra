@@ -1,0 +1,119 @@
+{
+  "id": null,
+  "uid": "lexguard-overview",
+  "title": "LexGuard AI — Overview",
+  "tags": ["lexguard"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 2,
+  "refresh": "15s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 7,
+      "title": "Contract Analysis Latency (P95, end-to-end)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 15000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(lexguard_lexguard_contract_analysis_latency_p95_milliseconds_bucket[15m])) by (le))",
+          "legendFormat": "p95 latency",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(lexguard_lexguard_contract_analysis_latency_p95_milliseconds_sum[15m])) / sum(rate(lexguard_lexguard_contract_analysis_latency_p95_milliseconds_count[15m]))",
+          "legendFormat": "average latency",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "title": "Enkrypt Pipeline Latency (P95)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(lexguard_lexguard_enkrypt_pipeline_latency_p95_milliseconds_bucket[5m])) by (le))",
+          "legendFormat": "p95 latency",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Enkrypt Rejection Rate",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+      "targets": [
+        { "expr": "lexguard_lexguard_enkrypt_rejection_rate", "legendFormat": "rejection %", "refId": "A" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Hallucination Rate",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+      "targets": [
+        { "expr": "lexguard_lexguard_hallucination_rate", "legendFormat": "hallucination %", "refId": "A" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "HITL Queue Depth",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "expr": "lexguard_lexguard_hitl_queue_depth", "legendFormat": "pending items", "refId": "A" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Qdrant Miss Rate",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+      "targets": [
+        { "expr": "lexguard_lexguard_qdrant_miss_rate", "legendFormat": "miss %", "refId": "A" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "LLM Token Usage (rate/5m)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(lexguard_lexguard_llm_token_usage_total[5m])) by (lexguard_model)",
+          "legendFormat": "{{lexguard_model}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

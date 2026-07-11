@@ -225,6 +225,7 @@ export const PAYLOAD_INDEXES: Record<string, Array<{ field: string; type: string
     { field: "session_id", type: "keyword" },
     { field: "org_id", type: "keyword" },
     { field: "user_id", type: "keyword" },
+    { field: "linked_contract_id", type: "keyword" },
   ],
   [QDRANT_COLLECTIONS.LEGAL_TEMPLATES]: [
     { field: "clause_type", type: "keyword" },

@@ -11,6 +11,8 @@
  *   GET    /api/v1/contracts/hitl/queue      - HITL review queue
  *   GET    /api/v1/contracts/hitl/:id        - HITL review item detail
  *   POST   /api/v1/contracts/hitl/:id/decision - Submit HITL decision
+ *   DELETE /api/v1/contracts/:id             - Delete one contract (full DB + Qdrant wipeout)
+ *   DELETE /api/v1/contracts                 - Bulk delete ({ ids: [...] } or { all: true })
  *   DELETE /api/v1/gdpr/erase/:orgId         - GDPR erasure
  *   GET    /api/v1/audit/trace/:traceId      - OTel trace retrieval
  *
@@ -22,6 +24,8 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
 import type { Router as ExpressRouter } from "express";
 import multer from "multer";
+import pdfParse from "pdf-parse";
+import mammoth from "mammoth";
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import { authMiddleware, requireRole } from "../middleware/auth";
@@ -36,9 +40,26 @@ import {
 } from "@lexguard/shared/schemas";
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
 import { getEnv } from "@lexguard/shared/env";
+import { getQdrantClient } from "@lexguard/qdrant/client";
+import { QDRANT_COLLECTIONS } from "@lexguard/shared/constants";
 
 export const contractsRouter: ExpressRouter = Router();
 const prisma = new PrismaClient();
+
+// Extracts real text from an uploaded file buffer so the analysis pipeline
+// works on actual document content instead of relying on S3 storage / OCR
+// integrations that aren't wired up in this deployment.
+async function extractTextFromBuffer(buffer: Buffer, mimeType: string): Promise<string> {
+  if (mimeType === "application/pdf") {
+    const result = await pdfParse(buffer);
+    return result.text;
+  }
+  if (mimeType.includes("wordprocessingml")) {
+    const result = await mammoth.extractRawText({ buffer });
+    return result.value;
+  }
+  return buffer.toString("utf-8");
+}
 
 // Wraps an async route handler so a rejected promise (e.g. a Prisma error from
 // a malformed :id) is forwarded to Express's error middleware instead of
@@ -115,6 +136,37 @@ async function createAuditLog(params: {
   }
 }
 
+// Permanently removes a contract and every trace of it: Qdrant vectors (clause
+// embeddings + linked Q&A conversation memory) are deleted first, then the
+// Postgres row — whose FK cascades (see schema.prisma onDelete: Cascade) wipe
+// Clause, WorkflowStageMetric, HitlQueueItem, and AuditLog rows in the same
+// statement. Qdrant deletion is best-effort: a Qdrant outage does not block
+// the Postgres wipeout, but is reported back so the caller knows to retry.
+async function deleteContractCompletely(
+  contractId: string
+): Promise<{ qdrantWiped: boolean; qdrantError?: string }> {
+  let qdrantWiped = true;
+  let qdrantError: string | undefined;
+  try {
+    const qdrant = getQdrantClient();
+    await qdrant.deleteByFilter(QDRANT_COLLECTIONS.CONTRACTS, {
+      must: [{ key: "contract_id", match: { value: contractId } }],
+    });
+    await qdrant.deleteByFilter(QDRANT_COLLECTIONS.CONVERSATION_MEMORY, {
+      must: [{ key: "linked_contract_id", match: { value: contractId } }],
+    });
+  } catch (err) {
+    qdrantWiped = false;
+    qdrantError = err instanceof Error ? err.message : String(err);
+    console.error(`[LexGuard][API] Qdrant wipeout failed for contract ${contractId}:`, err);
+  }
+
+  // Cascades to clauses, workflow_stage_metrics, hitl_queue, audit_logs.
+  await prisma.contract.delete({ where: { id: contractId } });
+
+  return { qdrantWiped, qdrantError };
+}
+
 // File upload middleware (memory storage; will stream to S3)
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -125,6 +177,7 @@ const upload = multer({
     const allowed = [
       "application/pdf",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "text/plain",
     ];
     if (allowed.includes(file.mimetype)) {
       callback(null, true);
@@ -166,7 +219,28 @@ contractsRouter.post(
         });
       }
 
-      // In production: upload file buffer to S3, get pre-signed URL
+      // Extract real text from the uploaded file so analysis reflects the
+      // actual document instead of a mock. (In production this would also
+      // upload the raw buffer to S3 for storage; that isn't wired up here.)
+      let contractText: string;
+      try {
+        contractText = await extractTextFromBuffer(req.file.buffer, req.file.mimetype);
+      } catch (extractErr) {
+        console.error("[LexGuard][API] Text extraction failed:", extractErr);
+        return res.status(422).json({
+          error: "EXTRACTION_FAILED",
+          message: "Could not extract text from the uploaded file. It may be corrupted, scanned-image-only, or password-protected.",
+          code: "LG-UPLOAD-004",
+        });
+      }
+      if (!contractText.trim()) {
+        return res.status(422).json({
+          error: "EMPTY_DOCUMENT",
+          message: "No extractable text was found in the uploaded file (it may be a scanned image with no OCR support yet).",
+          code: "LG-UPLOAD-005",
+        });
+      }
+
       const s3Key = `${req.orgId}/${uuidv4()}/${req.file.originalname}`;
       const rawFileUrl = `https://${process.env.S3_BUCKET_NAME}.s3.amazonaws.com/${s3Key}`;
 
@@ -194,6 +268,7 @@ contractsRouter.post(
         priority: bodyResult.data.priority,
         traceId: req.traceId!,
         spanId: uuidv4(),
+        contractText,
       });
 
       await prisma.contract.update({
@@ -289,6 +364,7 @@ contractsRouter.post(
         priority: body.data.priority ?? "standard",
         traceId: req.traceId!,
         spanId: uuidv4().replace(/-/g, "").slice(0, 16),
+        contractText,
       });
 
       await prisma.contract.update({
@@ -587,6 +663,85 @@ contractsRouter.get(
       total,
       page: query.page,
       pageSize: query.pageSize,
+    });
+  })
+);
+
+// ─── DELETE /api/v1/contracts/:id (single, full DB + vector wipeout) ─────────
+
+contractsRouter.delete(
+  "/contracts/:id",
+  authMiddleware,
+  asyncHandler(async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const contract = await prisma.contract.findFirst({
+      where: { id, orgId: req.orgId },
+      select: { id: true, fileName: true },
+    });
+    if (!contract) {
+      return res.status(404).json({
+        error: "NOT_FOUND",
+        message: "Contract not found for this tenant",
+      });
+    }
+
+    const result = await deleteContractCompletely(contract.id);
+
+    return res.status(200).json({
+      deleted: true,
+      contractId: contract.id,
+      fileName: contract.fileName,
+      qdrantWiped: result.qdrantWiped,
+      qdrantError: result.qdrantError,
+      message: result.qdrantWiped
+        ? "Contract and all associated data (clauses, embeddings, HITL items, audit logs) permanently deleted."
+        : "Contract deleted from Postgres, but Qdrant vector cleanup failed — some embeddings may remain. Check qdrantError.",
+    });
+  })
+);
+
+// ─── DELETE /api/v1/contracts (bulk — by ids[], or all=true for full wipe) ───
+
+const BulkDeleteBodySchema = z.object({
+  ids: z.array(z.string().uuid()).optional(),
+  all: z.boolean().optional(),
+});
+
+contractsRouter.delete(
+  "/contracts",
+  authMiddleware,
+  asyncHandler(async (req: Request, res: Response) => {
+    const body = BulkDeleteBodySchema.safeParse(req.body ?? {});
+    if (!body.success) {
+      return res.status(400).json({
+        error: "VALIDATION_ERROR",
+        details: body.error.flatten().fieldErrors,
+      });
+    }
+    if (!body.data.all && (!body.data.ids || body.data.ids.length === 0)) {
+      return res.status(400).json({
+        error: "VALIDATION_ERROR",
+        message: "Provide either { ids: string[] } or { all: true }",
+      });
+    }
+
+    const targets = await prisma.contract.findMany({
+      where: body.data.all
+        ? { orgId: req.orgId }
+        : { orgId: req.orgId, id: { in: body.data.ids } },
+      select: { id: true, fileName: true },
+    });
+
+    const results: Array<{ contractId: string; fileName: string; qdrantWiped: boolean; qdrantError?: string }> = [];
+    for (const target of targets) {
+      const result = await deleteContractCompletely(target.id);
+      results.push({ contractId: target.id, fileName: target.fileName, ...result });
+    }
+
+    return res.status(200).json({
+      deletedCount: results.length,
+      results,
+      message: `${results.length} contract(s) permanently deleted.`,
     });
   })
 );

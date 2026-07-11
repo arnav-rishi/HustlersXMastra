@@ -21,9 +21,8 @@
  */
 
 import { Agent } from "@mastra/core/agent";
-import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import { gpt4o, getAzureOpenAIClient, getChatDeployment } from "./models";
+import { gpt4o, getChatDeployment } from "./models";
 import crypto from "crypto";
 import {
   type RiskAgentInput,
@@ -112,113 +111,14 @@ OUTPUT FORMAT (strict JSON):
 }`;
 }
 
-// ─── Tool: analyze_clause_risk ────────────────────────────────────────────────
-
-const analyzeClauseRiskTool = createTool({
-  id: "analyze_clause_risk",
-  description:
-    "Analyzes a classified legal clause for legal and financial risks using GPT-4o with CRISPE prompting.",
-  inputSchema: z.object({
-    clauseType: z.string(),
-    clauseIndex: z.number(),
-    clauseText: z.string(),
-    jurisdiction: z.string(),
-    orgId: z.string(),
-    retrievedContext: z.string(),
-    benchmarkContext: z.string(),
-  }),
-  outputSchema: z.object({
-    riskReport: z.any(),
-    promptHash: z.string(),
-    modelVersion: z.string(),
-    inputTokens: z.number(),
-    outputTokens: z.number(),
-    latencyMs: z.number(),
-    hasUncertainty: z.boolean(),
-  }),
-  execute: async (input, context) => {
-    const openai = getAzureOpenAIClient();
-
-    const systemPrompt = buildRiskAnalysisPrompt({
-      clauseType: input.clauseType,
-      jurisdiction: input.jurisdiction,
-      orgName: `Org-${input.orgId.slice(0, 8)}`,
-      retrievedRisks: input.retrievedContext,
-      benchmarkSummary: input.benchmarkContext || "No benchmark data available",
-      industrySector: "Commercial",
-      clauseText: input.clauseText,
-    });
-
-    // SHA-256 hash of prompt for audit log (per PRD LG-COMP-002)
-    const promptHash = crypto
-      .createHash("sha256")
-      .update(systemPrompt)
-      .digest("hex");
-
-    const start = Date.now();
-
-    let hasUncertainty = false;
-    let riskReport: any = null;
-    let inputTokens = 0;
-    let outputTokens = 0;
-
-    try {
-      const response = await openai.chat.completions.create({
-        model: getChatDeployment(),
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: systemPrompt },
-          {
-            role: "user",
-            content: `Analyze the clause above (clauseIndex: ${input.clauseIndex}) and return the risk report JSON.`,
-          },
-        ],
-      });
-
-      inputTokens = response.usage?.prompt_tokens ?? 0;
-      outputTokens = response.usage?.completion_tokens ?? 0;
-
-      const content = response.choices[0]?.message?.content ?? "{}";
-      riskReport = JSON.parse(content);
-      riskReport.clauseIndex = input.clauseIndex;
-      riskReport.promptHash = promptHash;
-      riskReport.modelVersion = getChatDeployment();
-
-    } catch (err) {
-      hasUncertainty = true;
-      // Return safe partial result on failure (per PRD failure behavior)
-      riskReport = {
-        clauseType: input.clauseType,
-        clauseIndex: input.clauseIndex,
-        risks: [{
-          severity: RISK_SEVERITY.MODERATE,
-          description: "Risk analysis incomplete — LLM service error",
-          triggeringLanguage: input.clauseText.slice(0, 100),
-          financialExposure: "Unknown — manual review required",
-          citation: "Unverified",
-        }],
-        overallRisk: RISK_SEVERITY.MODERATE,
-        chainOfThought: "Analysis incomplete due to service error.",
-        promptHash,
-        modelVersion: getChatDeployment(),
-      };
-    }
-
-    const latencyMs = Date.now() - start;
-
-    // Record LLM token usage for cost tracking
-    recordLlmTokens(input.orgId, getChatDeployment(), inputTokens, outputTokens);
-
-    return {
-      riskReport,
-      promptHash,
-      modelVersion: getChatDeployment(),
-      inputTokens,
-      outputTokens,
-      latencyMs,
-      hasUncertainty,
-    };
-  },
+// ─── LLM-facing output schema ─────────────────────────────────────────────────
+// RiskReportSchema minus the fields WE compute after the call (promptHash,
+// modelVersion, latencyMs) — asking the model to invent those would be both
+// wrong and wasteful.
+const RiskReportLlmSchema = RiskReportSchema.omit({
+  modelVersion: true,
+  promptHash: true,
+  latencyMs: true,
 });
 
 // ─── Agent Definition ─────────────────────────────────────────────────────────
@@ -231,20 +131,109 @@ export const riskAgent: Agent = new Agent({
 Your role is to act as a Senior Commercial Counsel analyzing legal clauses for risk.
 
 For each clause:
-1. Use analyze_clause_risk to get a structured risk assessment
-2. Ensure the output contains: severity, triggering language, financial exposure, citation
-3. Never invent citations — use "Unverified" if unsupported by retrieved context
-4. CRITICAL clauses must have explicit financial exposure estimates
-5. Return the complete RiskReport JSON
+1. Identify severity, triggering language, financial exposure, citation for every risk
+2. Never invent citations — use "Unverified" if unsupported by retrieved context
+3. CRITICAL clauses must have explicit financial exposure estimates
+4. Return the complete RiskReport JSON
 
 The 4-step chain-of-thought reasoning is MANDATORY before producing output.`,
 
   model: gpt4o,
-
-  tools: {
-    analyze_clause_risk: analyzeClauseRiskTool,
-  },
 });
+
+// ─── Clause Risk Analysis (real agent.generateLegacy() call) ─────────────────
+// Runs the CRISPE prompt through the agent's own structured-output generation
+// instead of a raw client call — this is what makes it a genuine Mastra
+// AGENT_RUN with a real MODEL_GENERATION child span, not just an Agent object
+// that's constructed but never driven.
+
+async function analyzeClauseRisk(input: {
+  clauseType: string;
+  clauseIndex: number;
+  clauseText: string;
+  jurisdiction: string;
+  orgId: string;
+  retrievedContext: string;
+  benchmarkContext: string;
+}) {
+  const systemPrompt = buildRiskAnalysisPrompt({
+    clauseType: input.clauseType,
+    jurisdiction: input.jurisdiction,
+    orgName: `Org-${input.orgId.slice(0, 8)}`,
+    retrievedRisks: input.retrievedContext,
+    benchmarkSummary: input.benchmarkContext || "No benchmark data available",
+    industrySector: "Commercial",
+    clauseText: input.clauseText,
+  });
+
+  // SHA-256 hash of prompt for audit log (per PRD LG-COMP-002)
+  const promptHash = crypto.createHash("sha256").update(systemPrompt).digest("hex");
+
+  const start = Date.now();
+  let hasUncertainty = false;
+  let riskReport: any = null;
+  let inputTokens = 0;
+  let outputTokens = 0;
+
+  try {
+    const response = await riskAgent.generateLegacy<typeof RiskReportLlmSchema>(
+      [
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: `Analyze the clause above (clauseIndex: ${input.clauseIndex}) and return the risk report JSON.`,
+        },
+      ],
+      { output: RiskReportLlmSchema }
+    );
+
+    inputTokens = response.usage?.promptTokens ?? 0;
+    outputTokens = response.usage?.completionTokens ?? 0;
+
+    // Cast: TS's overload resolution for generateLegacy() doesn't reliably
+    // narrow `.object` to the inferred Zod type here even with an explicit
+    // type argument — a TS-only artifact, not a runtime one (verified: the
+    // real response.object is a genuine object matching RiskReportLlmSchema).
+    const generated = response.object as z.infer<typeof RiskReportLlmSchema>;
+    riskReport = { ...generated };
+    riskReport.clauseIndex = input.clauseIndex;
+    riskReport.promptHash = promptHash;
+    riskReport.modelVersion = getChatDeployment();
+  } catch (err) {
+    hasUncertainty = true;
+    // Return safe partial result on failure (per PRD failure behavior)
+    riskReport = {
+      clauseType: input.clauseType,
+      clauseIndex: input.clauseIndex,
+      risks: [{
+        severity: RISK_SEVERITY.MODERATE,
+        description: "Risk analysis incomplete — LLM service error",
+        triggeringLanguage: input.clauseText.slice(0, 100),
+        financialExposure: "Unknown — manual review required",
+        citation: "Unverified",
+      }],
+      overallRisk: RISK_SEVERITY.MODERATE,
+      chainOfThought: "Analysis incomplete due to service error.",
+      promptHash,
+      modelVersion: getChatDeployment(),
+    };
+  }
+
+  const latencyMs = Date.now() - start;
+
+  // Record LLM token usage for cost tracking
+  recordLlmTokens(input.orgId, getChatDeployment(), inputTokens, outputTokens);
+
+  return {
+    riskReport,
+    promptHash,
+    modelVersion: getChatDeployment(),
+    inputTokens,
+    outputTokens,
+    latencyMs,
+    hasUncertainty,
+  };
+}
 
 // ─── Agent Executor ───────────────────────────────────────────────────────────
 
@@ -269,7 +258,7 @@ export async function executeRiskAgent(
         .map((item) => `[${item.collection}] score:${item.score.toFixed(2)} — ${JSON.stringify(item.payload).slice(0, 300)}`)
         .join("\n");
 
-      const result = (await analyzeClauseRiskTool.execute?.({
+      const result = await analyzeClauseRisk({
         clauseType: input.clause.clauseType ?? "unknown",
         clauseIndex: input.clause.clauseIndex,
         clauseText: input.clause.clauseText,
@@ -277,7 +266,7 @@ export async function executeRiskAgent(
         orgId: input.orgId,
         retrievedContext,
         benchmarkContext: "",
-      }, {} as any)) as any || {};
+      });
 
       const riskReport: RiskReport = {
         ...(result.riskReport || {}),
