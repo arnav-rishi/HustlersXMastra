@@ -13,12 +13,19 @@ type DashboardContract = {
   date: string;
 };
 
+type DashboardMetrics = {
+  totalContracts: number;
+  riskCounts: { critical: number; moderate: number; low: number };
+  hitl: { pending: number; decided: number };
+  complianceRatePct: number;
+};
 
 export default function DashboardPage() {
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
   const [recentContracts, setRecentContracts] = useState<DashboardContract[]>([]);
+  const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
   const uploadZoneRef = useRef<HTMLDivElement>(null);
 
@@ -38,9 +45,25 @@ export default function DashboardPage() {
     }
   }, []);
 
+  const fetchMetrics = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/analytics/summary`, {
+        headers: getApiHeaders(),
+      });
+      if (!response.ok) {
+        return;
+      }
+      const payload = (await response.json()) as DashboardMetrics;
+      setMetrics(payload);
+    } catch {
+      setMetrics(null);
+    }
+  }, []);
+
   useEffect(() => {
     void fetchRecentContracts();
-  }, [fetchRecentContracts]);
+    void fetchMetrics();
+  }, [fetchRecentContracts, fetchMetrics]);
 
   const analyzeContract = useCallback(async (file: File) => {
     setUploading(true);
@@ -125,27 +148,29 @@ export default function DashboardPage() {
       <div className="metrics-grid">
         <div className="metric-card">
           <div className="metric-icon">📄</div>
-          <div className="metric-value">142</div>
+          <div className="metric-value">{metrics ? metrics.totalContracts : "—"}</div>
           <div className="metric-label">Contracts Analyzed</div>
-          <div className="metric-delta">↑ 12 this week</div>
+          <div className="metric-delta">All-time total</div>
         </div>
         <div className="metric-card danger">
           <div className="metric-icon danger">⚠</div>
-          <div className="metric-value" style={{ color: "var(--risk-high)" }}>7</div>
+          <div className="metric-value" style={{ color: "var(--risk-high)" }}>{metrics ? metrics.hitl.pending : "—"}</div>
           <div className="metric-label">Pending HITL Review</div>
-          <div className="metric-delta" style={{ color: "var(--risk-high)" }}>Requires attention</div>
+          <div className="metric-delta" style={{ color: "var(--risk-high)" }}>
+            {metrics && metrics.hitl.pending > 0 ? "Requires attention" : "None pending"}
+          </div>
         </div>
         <div className="metric-card warning">
           <div className="metric-icon warning">🚩</div>
-          <div className="metric-value" style={{ color: "var(--risk-med)" }}>3</div>
+          <div className="metric-value" style={{ color: "var(--risk-med)" }}>{metrics ? metrics.riskCounts.critical : "—"}</div>
           <div className="metric-label">High Risk Flagged</div>
           <div className="metric-delta" style={{ color: "var(--risk-med)" }}>Enkrypt score &lt; 0.70</div>
         </div>
         <div className="metric-card success">
           <div className="metric-icon success">✓</div>
-          <div className="metric-value" style={{ color: "var(--risk-low)" }}>94.2%</div>
+          <div className="metric-value" style={{ color: "var(--risk-low)" }}>{metrics ? `${metrics.complianceRatePct}%` : "—"}</div>
           <div className="metric-label">Compliance Rate</div>
-          <div className="metric-delta">↑ 2.1% vs last month</div>
+          <div className="metric-delta">Across all analyzed contracts</div>
         </div>
       </div>
 
