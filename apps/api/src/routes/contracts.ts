@@ -879,7 +879,7 @@ contractsRouter.delete(
   "/gdpr/erase/:orgId",
   authMiddleware,
   requireRole("compliance_officer"),
-  async (req: Request, res: Response) => {
+  asyncHandler(async (req: Request, res: Response) => {
     const { orgId } = req.params;
 
     // Security: only the org itself (or a super-admin) can request erasure
@@ -890,20 +890,57 @@ contractsRouter.delete(
       });
     }
 
-    // In production: trigger GDPR Deletion Service
-    // - Delete S3 objects with prefix: {orgId}/
-    // - DELETE FROM * WHERE org_id = orgId in Postgres
-    // - Qdrant delete_by_filter: {org_id: orgId} across all 8 collections
-    // - Create deletion audit entry (retained for 7 years)
-    // - Confirm completion within 24 hours SLA
-    return res.status(202).json({
-      orgId,
-      status: "erasure_initiated",
-      slaHours: 24,
-      message: "GDPR erasure initiated. Completion within 24 hours.",
-      deletionRequestId: uuidv4(),
+    // Not implemented in local dev (no S3 / Qdrant Cloud credentials scoped
+    // for destructive ops here): S3 object deletion and Qdrant delete_by_filter
+    // across the 8 collections. Postgres erasure below IS real.
+    const deletionRequest = await prisma.deletionRequest.create({
+      data: {
+        orgId,
+        requestedBy: req.user!.sub,
+        status: "IN_PROGRESS",
+      },
     });
-  }
+
+    try {
+      // hitl_queue.contract_id is ON DELETE RESTRICT, so those rows must be
+      // cleared before contracts can be deleted. audit_logs.contract_id is
+      // ON DELETE SET NULL, so audit history is retained (7-year compliance
+      // retention) even after the contract itself is erased.
+      const hitlDeleted = await prisma.hitlQueueItem.deleteMany({ where: { orgId } });
+      const contractsDeleted = await prisma.contract.deleteMany({ where: { orgId } });
+      const pgRowsDeleted = hitlDeleted.count + contractsDeleted.count;
+
+      await prisma.deletionRequest.update({
+        where: { id: deletionRequest.id },
+        data: { status: "PARTIAL", pgRowsDeleted, completedAt: new Date() },
+      });
+
+      await createAuditLog({
+        orgId,
+        traceId: req.traceId,
+        agentId: "gdpr-service",
+        eventType: "gdpr_erasure_completed",
+        payload: { deletionRequestId: deletionRequest.id, pgRowsDeleted },
+      });
+
+      return res.status(202).json({
+        orgId,
+        status: "erasure_initiated",
+        slaHours: 24,
+        message:
+          "GDPR erasure: Postgres contract/HITL data erased immediately. " +
+          "S3 object deletion and Qdrant delete_by_filter are not implemented in local dev.",
+        deletionRequestId: deletionRequest.id,
+        pgRowsDeleted,
+      });
+    } catch (err) {
+      await prisma.deletionRequest.update({
+        where: { id: deletionRequest.id },
+        data: { status: "FAILED", errorMessage: err instanceof Error ? err.message : String(err) },
+      });
+      throw err;
+    }
+  })
 );
 
 // ─── GET /api/v1/audit/trace/:traceId ────────────────────────────────────────
@@ -912,17 +949,24 @@ contractsRouter.get(
   "/audit/trace/:traceId",
   authMiddleware,
   requireRole("legal_operations"),
-  async (req: Request, res: Response) => {
+  asyncHandler(async (req: Request, res: Response) => {
     const { traceId } = req.params;
 
-    // In production: query Jaeger API for trace + Postgres audit log
+    // Postgres audit log lookup is real. Jaeger span retrieval (the
+    // OTel/distributed-tracing half of this endpoint) is not implemented —
+    // would require an HTTP call to the Jaeger Query API for this traceId.
+    const auditLog = await prisma.auditLog.findMany({
+      where: { traceId, orgId: req.orgId },
+      orderBy: { timestamp: "asc" },
+    });
+
     return res.status(200).json({
       traceId,
       spans: [],
-      auditLog: [],
-      message: "Audit trace retrieval — Phase 4 implementation pending",
+      spansNote: "Jaeger span retrieval not implemented in local dev — see http://localhost:16686 to inspect this trace directly.",
+      auditLog,
     });
-  }
+  })
 );
 
 // ─── GET /api/v1/contracts/:id/metrics ───────────────────────────────────────
