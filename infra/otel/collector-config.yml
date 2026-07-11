@@ -20,8 +20,8 @@ processors:
         value: development
 
 exporters:
-  jaeger:
-    endpoint: jaeger:14250
+  otlp/jaeger:
+    endpoint: jaeger:4317
     tls:
       insecure: true
   prometheus:
@@ -31,11 +31,14 @@ exporters:
     loglevel: warn
 
 service:
+  telemetry:
+    metrics:
+      address: 0.0.0.0:8889
   pipelines:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch, resource]
-      exporters: [jaeger, logging]
+      exporters: [otlp/jaeger, logging]
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, batch]

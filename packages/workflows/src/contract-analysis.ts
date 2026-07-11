@@ -73,6 +73,28 @@ const prisma = new PrismaClient();
 // On success → status="completed" + durationMs
 // On failure → status="failed" + errorMessage; re-throws so Mastra can retry.
 
+// Stage order used to compute a live progress percentage as each stage starts,
+// so GET /api/v1/contracts/:id/status reflects real-time pipeline progress
+// instead of only the initial "queued" write and the final "completed" write.
+const STAGE_ORDER = [
+  "document-validation",
+  "parsing",
+  "embedding",
+  "classification-and-retrieval",
+  "risk-and-benchmark",
+  "rewrite",
+  "compliance",
+  "evaluation",
+  "hitl-gate",
+  "reporting",
+];
+
+function progressPctForStageStart(stageName: string): number {
+  const idx = STAGE_ORDER.indexOf(stageName);
+  if (idx === -1) return 0;
+  return Math.round((idx / STAGE_ORDER.length) * 100);
+}
+
 async function recordStageMetric<T>(
   contractId: string,
   workflowId: string,
@@ -87,6 +109,16 @@ async function recordStageMetric<T>(
     })
     .catch((e: any) =>
       console.warn(`[LexGuard][Workflow] Stage metric insert failed (${stageName}):`, e)
+    );
+  // Reflect live progress on the Contract row so /status polling isn't stuck at "queued".
+  // The final "reporting" step separately sets progressPct=100 + status=COMPLETED.
+  prisma.contract
+    .update({
+      where: { id: contractId },
+      data: { workflowStep: stageName, progressPct: progressPctForStageStart(stageName) },
+    })
+    .catch((e: any) =>
+      console.warn(`[LexGuard][Workflow] Contract progress update failed (${stageName}):`, e)
     );
 
   try {
@@ -607,15 +639,53 @@ const hitlGateStep = createStep({
     const initData = getInitData<WorkflowInput>();
     const wfId = initData.workflowId ?? "unknown";
     return recordStageMetric(inputData.contractId, wfId, "hitl-gate", async () => {
+      let hitlItemIds: string[] = [];
+
       if (inputData.hitlRequired) {
+        // Persist a real HITL queue row so the review dashboard has something
+        // to show. Enkrypt confidence is currently computed at the contract
+        // level (not per-clause), so we surface the most severe clause as the
+        // representative item for the reviewer.
+        const topRisk =
+          inputData.riskResults.find(
+            (r: any) => r.riskReports?.[0]?.overallRisk === "Critical"
+          ) ?? inputData.riskResults[0];
+        const topReport = topRisk?.riskReports?.[0];
+        const matchingRewrite = inputData.rewriteResults.find(
+          (rw: any) => rw.clauseIndex === topReport?.clauseIndex
+        );
+        const slaDeadline = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+        const hitlItem = await prisma.hitlQueueItem.create({
+          data: {
+            orgId: inputData.orgId,
+            contractId: inputData.contractId,
+            clauseIndex: topReport?.clauseIndex ?? 0,
+            reason: "ENKRYPT_CONFIDENCE_LOW",
+            originalClause:
+              topReport?.risks?.[0]?.triggeringLanguage ?? "Clause text unavailable",
+            aiSuggestion: matchingRewrite?.rewrites?.[0]?.text ?? null,
+            riskReason:
+              topReport?.risks?.[0]?.description ?? "Low confidence — manual review required",
+            confidenceScore: inputData.confidenceScore,
+            slaDeadline,
+          },
+        });
+        hitlItemIds = [hitlItem.id];
+
+        await prisma.contract.update({
+          where: { id: inputData.contractId },
+          data: { status: "HITL_REQUIRED", workflowStatus: "hitl_required" },
+        });
+
         // Suspend the workflow — Mastra will persist state
-        // The HITL portal calls POST /api/v1/hitl/{id}/decision to resume
+        // The HITL portal calls POST /api/v1/contracts/hitl/:id/decision to resume
         console.log(
-          `[Workflow] HITL suspend for contract ${inputData.contractId}. Items: ${inputData.hitlItemIds.join(", ")}`
+          `[Workflow] HITL suspend for contract ${inputData.contractId}. Item: ${hitlItem.id}`
         );
         await suspend({
           reason: "enkrypt_confidence_below_threshold",
-          hitlItemIds: inputData.hitlItemIds,
+          hitlItemIds,
           contractId: inputData.contractId,
         });
       }
@@ -631,7 +701,7 @@ const hitlGateStep = createStep({
       return {
         contractId: inputData.contractId,
         approvedForReport: inputData.enkryptPass,
-        hitlItemIds: inputData.hitlItemIds,
+        hitlItemIds,
         riskResults: inputData.riskResults,
         benchmarkResults: inputData.benchmarkResults,
         rewriteResults: inputData.rewriteResults,
@@ -694,6 +764,7 @@ const reportingStep = createStep({
           workflowStep: "reporting",
           completedAt: new Date(),
           progressPct: 100,
+          overallRisk: report.overallRisk.toUpperCase() as "CRITICAL" | "MODERATE" | "LOW",
         },
       });
 

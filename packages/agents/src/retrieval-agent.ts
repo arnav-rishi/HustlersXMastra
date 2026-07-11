@@ -24,8 +24,7 @@
 import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import { gpt4oMini } from "./models";
-import OpenAI from "openai";
+import { gpt4oMini, getAzureOpenAIClient, getEmbeddingDeployment } from "./models";
 import {
   type RetrievalAgentInput,
   type RetrievalAgentOutput,
@@ -40,21 +39,18 @@ import {
   RETRIEVAL_TOP_K,
   MAX_CONTEXT_TOKENS,
   CONTEXT_PRIORITY,
-  EMBEDDING_MODEL,
   EMBEDDING_DIMENSIONS,
 } from "@lexguard/shared/constants";
 import { getQdrantClient } from "@lexguard/qdrant/client";
 import { recordQdrantQuery } from "@lexguard/observability/metrics";
-import { getEnv } from "@lexguard/shared/env";
 
 // ─── Embedding Helper ──────────────────────────────────────────────────────────
 
 async function embedText(text: string): Promise<number[]> {
-  const env = getEnv();
-  const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+  const openai = getAzureOpenAIClient();
 
   const res = await openai.embeddings.create({
-    model: EMBEDDING_MODEL,
+    model: getEmbeddingDeployment(),
     input: text,
     dimensions: EMBEDDING_DIMENSIONS,
   });

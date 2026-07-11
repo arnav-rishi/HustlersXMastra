@@ -14,9 +14,22 @@ const envSchema = z.object({
     .enum(["development", "test", "production"])
     .default("development"),
 
-  // OpenAI
-  OPENAI_API_KEY: z.string().min(1, "OPENAI_API_KEY is required"),
+  // OpenAI (legacy — superseded by Azure OpenAI below; kept optional for local scripts)
+  OPENAI_API_KEY: z.string().optional(),
   OPENAI_ORG_ID: z.string().optional(),
+
+  // Azure OpenAI (Azure AI Foundry) — powers all 13 agents + embeddings
+  AZURE_OPENAI_API_KEY: z.string().min(1, "AZURE_OPENAI_API_KEY is required"),
+  AZURE_OPENAI_ENDPOINT: z
+    .string()
+    .url("AZURE_OPENAI_ENDPOINT must be a valid URL, e.g. https://<resource>.openai.azure.com"),
+  AZURE_OPENAI_API_VERSION: z.string().default("2024-10-01-preview"),
+  // Chat-completion deployment names (as created in Azure AI Foundry, not raw model names)
+  AZURE_OPENAI_DEPLOYMENT: z.string().min(1, "AZURE_OPENAI_DEPLOYMENT is required"),
+  AZURE_OPENAI_DEPLOYMENT_MINI: z.string().optional(),
+  // Embedding deployment (e.g. a text-embedding-3-large deployment) — required only
+  // for agents that generate embeddings (Embedding, Memory, QA, Retrieval agents)
+  AZURE_OPENAI_EMBEDDING_DEPLOYMENT: z.string().optional(),
 
   // Mastra
   MASTRA_API_KEY: z.string().optional(),

@@ -8,13 +8,10 @@ import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import crypto from "crypto";
-import OpenAI from "openai";
 import type { RewriteAgentInput, RewriteAgentOutput, RewriteVersion } from "@lexguard/shared/schemas";
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
-import { LLM_MODELS } from "@lexguard/shared/constants";
 import { recordLlmTokens } from "@lexguard/observability/metrics";
-import { getEnv } from "@lexguard/shared/env";
-import { gpt4oMini } from "./models";
+import { gpt4oMini, getAzureOpenAIClient, getChatDeploymentMini } from "./models";
 
 const generateRewritesTool = createTool({
   id: "generate_clause_rewrites",
@@ -39,8 +36,7 @@ const generateRewritesTool = createTool({
     fallbackMode: z.boolean(),
   }),
   execute: async (input, context) => {
-    const env = getEnv();
-    const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+    const openai = getAzureOpenAIClient();
 
     const systemPrompt = `ROLE: Expert Legal Draftsman.
   Generate exactly 3 clause rewrites for a ${input.clauseType} flagged as ${input.riskLevel} risk.
@@ -62,8 +58,7 @@ const generateRewritesTool = createTool({
 
     try {
       const response = await openai.chat.completions.create({
-        model: LLM_MODELS.GPT4O_MINI,
-        temperature: 0.3,
+        model: getChatDeploymentMini(),
         response_format: { type: "json_object" },
         messages: [
             { role: "system", content: systemPrompt },
@@ -85,8 +80,8 @@ const generateRewritesTool = createTool({
     }
 
     const latencyMs = Date.now() - start;
-    recordLlmTokens(input.orgId, LLM_MODELS.GPT4O_MINI, inputTokens, outputTokens);
-    return { rewrites: rewrites.map((r: any, i: number) => ({ ...r, version: r.version ?? i + 1, enkryptValidated: false })), promptHash, modelVersion: LLM_MODELS.GPT4O_MINI, inputTokens, outputTokens, latencyMs, fallbackMode };
+    recordLlmTokens(input.orgId, getChatDeploymentMini(), inputTokens, outputTokens);
+    return { rewrites: rewrites.map((r: any, i: number) => ({ ...r, version: r.version ?? i + 1, enkryptValidated: false })), promptHash, modelVersion: getChatDeploymentMini(), inputTokens, outputTokens, latencyMs, fallbackMode };
   },
 });
 
@@ -101,7 +96,7 @@ export const rewriteAgent: Agent = new Agent({
 export async function executeRewriteAgent(input: RewriteAgentInput): Promise<RewriteAgentOutput> {
   return withSpan(OTEL_SPAN_NAMES.LLM_GPT4O_MINI_COMPLETION, {
     "lexguard.org_id": input.orgId, "lexguard.contract_id": input.contractId,
-    "lexguard.agent_id": "rewrite-agent", "llm.model": LLM_MODELS.GPT4O_MINI,
+    "lexguard.agent_id": "rewrite-agent", "llm.model": getChatDeploymentMini(),
   }, async (span) => {
     const orgPreferences = input.orgPreferences.map((p) => JSON.stringify(p.payload).slice(0, 150)).join("\n");
     const riskSummary = input.riskReport.risks.map((r: any) => `${r.severity}: ${r.description}`).join("; ");

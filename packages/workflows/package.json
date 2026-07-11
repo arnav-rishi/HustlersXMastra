@@ -2,12 +2,14 @@
   "name": "@lexguard/workflows",
   "version": "1.0.0",
   "private": true,
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    "./contract-analysis": "./src/contract-analysis.ts"
+    "./contract-analysis": { "types": "./dist/contract-analysis.d.ts", "development": "./src/contract-analysis.ts", "default": "./dist/contract-analysis.js" }
   },
   "scripts": {
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "@mastra/core": "^1.50.0",

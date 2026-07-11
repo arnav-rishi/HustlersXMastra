@@ -22,9 +22,9 @@
 import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import { gpt4oMini } from "./models";
+import { gpt4oMini, getAzureOpenAIClient, getEmbeddingDeployment } from "./models";
 import { v4 as uuidv4 } from "uuid";
-import OpenAI from "openai";
+import type { AzureOpenAI } from "openai";
 import {
   type EmbeddingAgentInput,
   type EmbeddingAgentOutput,
@@ -39,20 +39,12 @@ import {
   SLA,
 } from "@lexguard/shared/constants";
 import { getQdrantClient } from "@lexguard/qdrant/client";
-import { getEnv } from "@lexguard/shared/env";
-
-// ─── OpenAI Embedding Client ──────────────────────────────────────────────────
-
-function getOpenAIClient(): OpenAI {
-  const env = getEnv();
-  return new OpenAI({ apiKey: env.OPENAI_API_KEY });
-}
 
 // ─── Tools ───────────────────────────────────────────────────────────────────
 
 /**
  * Tool: generate_embeddings
- * Batches clauses and generates embeddings via OpenAI text-embedding-3-large.
+ * Batches clauses and generates embeddings via the Azure OpenAI embedding deployment.
  * Max batch size: 100 (OpenAI API limit).
  */
 const generateEmbeddingsTool = createTool({
@@ -61,7 +53,6 @@ const generateEmbeddingsTool = createTool({
     "Generates text-embedding-3-large (1536d) embeddings for a batch of clause texts. Returns embedding vectors.",
   inputSchema: z.object({
     texts: z.array(z.string()),
-    model: z.string().default(EMBEDDING_MODEL),
   }),
   outputSchema: z.object({
     embeddings: z.array(z.array(z.number())),
@@ -69,8 +60,9 @@ const generateEmbeddingsTool = createTool({
     totalTokens: z.number(),
   }),
   execute: async (input, context) => {
-    const { texts, model } = input;
-    const openai = getOpenAIClient();
+    const { texts } = input;
+    const openai: AzureOpenAI = getAzureOpenAIClient();
+    const model = getEmbeddingDeployment();
 
     // Process in batches of 100
     const BATCH_SIZE = 100;
@@ -232,7 +224,7 @@ export async function executeEmbeddingAgent(
       "lexguard.org_id": input.orgId,
       "lexguard.contract_id": input.contractId,
       "lexguard.agent_id": "embedding-agent",
-      "embedding.model": EMBEDDING_MODEL,
+      "embedding.model": getEmbeddingDeployment(),
       "embedding.chunk_count": input.clauses.length,
       "qdrant.collection": QDRANT_COLLECTIONS.CONTRACTS,
     },
@@ -245,7 +237,7 @@ export async function executeEmbeddingAgent(
 
       // Step 1: Generate embeddings for all clause texts
       const texts = input.clauses.map((c) => c.clauseText);
-      const embeddingResult = (await generateEmbeddingsTool.execute?.({ texts, model: EMBEDDING_MODEL }, {} as any)) as any || { embeddings: [], model: EMBEDDING_MODEL, totalTokens: 0 };
+      const embeddingResult = (await generateEmbeddingsTool.execute?.({ texts }, {} as any)) as any || { embeddings: [], model: getEmbeddingDeployment(), totalTokens: 0 };
 
       // Step 2: Upsert to Qdrant with full metadata
       const upsertResult = (await upsertToQdrantTool.execute?.({ contractId: input.contractId, orgId: input.orgId, tenantId: input.tenantId, jurisdiction: input.jurisdiction, clauses: input.clauses.map((c) => ({ clauseIndex: c.clauseIndex, clauseType: c.clauseType, clauseText: c.clauseText, pageNumber: c.pageNumber, boundingBox: c.boundingBox })), embeddings: embeddingResult.embeddings }, {} as any)) as any || { upsertedCount: 0, chunkIds: [], upsertLatencyMs: 0 };
@@ -260,7 +252,7 @@ export async function executeEmbeddingAgent(
         contractId: input.contractId,
         clauses: input.clauses,
         chunksUpserted: upsertResult.upsertedCount,
-        embeddingModel: EMBEDDING_MODEL,
+        embeddingModel: getEmbeddingDeployment(),
         qdrantCollection: QDRANT_COLLECTIONS.CONTRACTS,
         upsertLatencyMs: upsertResult.upsertLatencyMs,
         chunkIds: upsertResult.chunkIds,

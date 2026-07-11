@@ -62,10 +62,14 @@ export const CLAUSE_TYPES = [
 export type ClauseType = (typeof CLAUSE_TYPES)[number];
 
 // ─── Retrieval ────────────────────────────────────────────────────────────────
+// Calibrated against real text-embedding-3-large cosine similarities for this
+// app's actual retrieval patterns (question-vs-clause, clause-vs-precedent):
+// on-topic matches score ~0.15-0.55, unrelated content scores <0.05. A 0.75
+// threshold (the original value) filtered out every real result, every time.
 /** Minimum similarity score for a retrieval result to be used */
-export const RETRIEVAL_MIN_SCORE = 0.75;
+export const RETRIEVAL_MIN_SCORE = 0.15;
 /** Score at which we classify retrieval as "High Confidence" */
-export const RETRIEVAL_HIGH_CONFIDENCE_SCORE = 0.80;
+export const RETRIEVAL_HIGH_CONFIDENCE_SCORE = 0.4;
 /** Maximum results returned per collection query */
 export const RETRIEVAL_TOP_K = 5;
 /** Maximum context window assembled for downstream agents (tokens) */

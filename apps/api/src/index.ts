@@ -138,11 +138,9 @@ app.get("/ready", async (_req, res) => {
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
-app.use("/api/v1/contracts", contractsRouter);
-app.use("/api/v1/qa", contractsRouter);        // QA route is on contracts router
-app.use("/api/v1/hitl", contractsRouter);      // HITL routes on contracts router
-app.use("/api/v1/gdpr", contractsRouter);      // GDPR on contracts router
-app.use("/api/v1/audit", contractsRouter);     // Audit on contracts router
+// contractsRouter defines its own fully-qualified sub-paths (/contracts/*, /qa,
+// /hitl/*, /gdpr/*, /audit/*), so it is mounted once at the shared /api/v1 root.
+app.use("/api/v1", contractsRouter);
 
 // ─── 404 Handler ─────────────────────────────────────────────────────────────
 app.use((_req, res) => {

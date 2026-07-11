@@ -2,14 +2,16 @@
   "name": "@lexguard/qdrant",
   "version": "1.0.0",
   "private": true,
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    "./client": "./src/client.ts",
-    "./collections": "./src/collections.ts",
-    "./init": "./src/init.ts"
+    "./client": { "types": "./dist/client.d.ts", "development": "./src/client.ts", "default": "./dist/client.js" },
+    "./collections": { "types": "./dist/collections.d.ts", "development": "./src/collections.ts", "default": "./dist/collections.js" },
+    "./init": { "types": "./dist/init.d.ts", "development": "./src/init.ts", "default": "./dist/init.js" }
   },
   "scripts": {
     "type-check": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
     "init": "tsx src/init.ts"
   },
   "dependencies": {

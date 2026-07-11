@@ -10,13 +10,11 @@ import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import crypto from "crypto";
-import OpenAI from "openai";
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
-import { LLM_MODELS, RISK_SEVERITY } from "@lexguard/shared/constants";
+import { RISK_SEVERITY } from "@lexguard/shared/constants";
 import { recordLlmTokens } from "@lexguard/observability/metrics";
-import { getEnv } from "@lexguard/shared/env";
 import type { AnalysisReport, RiskSeverity } from "@lexguard/shared/schemas";
-import { gpt4oMini } from "./models";
+import { gpt4oMini, getAzureOpenAIClient, getChatDeploymentMini } from "./models";
 
 export interface ReportingAgentInput {
   contractId: string;
@@ -41,8 +39,7 @@ const generateExecutiveSummaryTool = createTool({
   }),
   outputSchema: z.object({ summary: z.string(), promptHash: z.string(), inputTokens: z.number(), outputTokens: z.number() }),
   execute: async (input, context) => {
-    const env = getEnv();
-    const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+    const openai = getAzureOpenAIClient();
     const prompt = `ROLE: Senior Legal Analyst producing a board-ready contract intelligence report.
 Write an executive summary for a ${input.contractTitle} (${input.jurisdiction}).
 Max 150 words. Flesch-Kincaid readability score > 60 (plain English, short sentences, active voice).
@@ -53,7 +50,7 @@ Return JSON: {"summary":"..."}`;
     let summary = ""; let inputTokens = 0, outputTokens = 0;
     try {
       const response = await openai.chat.completions.create({
-        model: LLM_MODELS.GPT4O_MINI, temperature: 0.4,
+        model: getChatDeploymentMini(),
         response_format: { type: "json_object" },
         messages: [{ role: "system", content: prompt }, { role: "user", content: "Generate the executive summary." }],
       });
@@ -61,7 +58,7 @@ Return JSON: {"summary":"..."}`;
       outputTokens = response.usage?.completion_tokens ?? 0;
       const parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
       summary = parsed.summary ?? "Executive summary unavailable.";
-      recordLlmTokens(input.orgId, LLM_MODELS.GPT4O_MINI, inputTokens, outputTokens);
+      recordLlmTokens(input.orgId, getChatDeploymentMini(), inputTokens, outputTokens);
     } catch {
       summary = `Contract analysis complete. Found ${input.criticalCount} Critical, ${input.moderateCount} Moderate, and ${input.lowCount} Low risk clauses across ${input.totalClauses} total clauses. ${input.complianceIssues} compliance issues detected. ${input.hitlPending} items require human review.`;
     }

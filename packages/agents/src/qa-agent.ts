@@ -14,24 +14,21 @@ import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import crypto from "crypto";
-import OpenAI from "openai";
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
 import {
-  LLM_MODELS, QDRANT_COLLECTIONS, EMBEDDING_MODEL,
+  QDRANT_COLLECTIONS,
   EMBEDDING_DIMENSIONS, RETRIEVAL_MIN_SCORE, RETRIEVAL_TOP_K,
   TTL, ENKRYPT_QA_CONFIDENCE_THRESHOLD,
 } from "@lexguard/shared/constants";
 import { getQdrantClient } from "@lexguard/qdrant/client";
 import { recordLlmTokens } from "@lexguard/observability/metrics";
 import { runEnkryptPipeline } from "@lexguard/enkrypt/pipeline";
-import { getEnv } from "@lexguard/shared/env";
 import type { QARequest, QAResponse } from "@lexguard/shared/schemas";
-import { gpt4o } from "./models";
+import { gpt4o, getAzureOpenAIClient, getChatDeployment, getEmbeddingDeployment } from "./models";
 
 async function embedText(text: string): Promise<number[]> {
-  const env = getEnv();
-  const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
-  const res = await openai.embeddings.create({ model: EMBEDDING_MODEL, input: text, dimensions: EMBEDDING_DIMENSIONS });
+  const openai = getAzureOpenAIClient();
+  const res = await openai.embeddings.create({ model: getEmbeddingDeployment(), input: text, dimensions: EMBEDDING_DIMENSIONS });
   return res.data[0]?.embedding ?? new Array(EMBEDDING_DIMENSIONS).fill(0);
 }
 
@@ -67,8 +64,7 @@ const answerQuestionTool = createTool({
   inputSchema: z.object({ question: z.string(), contextText: z.string(), jurisdiction: z.string().optional(), orgId: z.string() }),
   outputSchema: z.object({ answer: z.string(), citations: z.array(z.string()), promptHash: z.string(), inputTokens: z.number(), outputTokens: z.number() }),
   execute: async (input, context) => {
-    const env = getEnv();
-    const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+    const openai = getAzureOpenAIClient();
     const prompt = `You are a Senior Legal Analyst answering questions about a contract.
   Answer in plain English (Flesch-Kincaid readability > 60). Cite the specific clause.
   Do NOT give definitive legal advice — provide analysis and recommend consulting a qualified attorney.
@@ -84,7 +80,7 @@ const answerQuestionTool = createTool({
     let answer = ""; let citations: string[] = []; let inputTokens = 0, outputTokens = 0;
     try {
       const response = await openai.chat.completions.create({
-        model: LLM_MODELS.GPT4O, temperature: 0.2, response_format: { type: "json_object" },
+        model: getChatDeployment(), response_format: { type: "json_object" },
         messages: [{ role: "system", content: prompt }, { role: "user", content: "Answer the question." }],
       });
       inputTokens = response.usage?.prompt_tokens ?? 0;
@@ -92,7 +88,7 @@ const answerQuestionTool = createTool({
       const parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
       answer = parsed.answer ?? "Unable to generate answer.";
       citations = Array.isArray(parsed.citations) ? parsed.citations : [];
-      recordLlmTokens(input.orgId, LLM_MODELS.GPT4O, inputTokens, outputTokens);
+      recordLlmTokens(input.orgId, getChatDeployment(), inputTokens, outputTokens);
     } catch { answer = "Analysis temporarily unavailable. Please try again."; }
     return { answer, citations, promptHash, inputTokens, outputTokens };
   },

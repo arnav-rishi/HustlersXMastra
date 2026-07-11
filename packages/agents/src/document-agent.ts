@@ -233,7 +233,7 @@ export async function executeDocumentAgent(
       const contractId = input.otel.contractId;
 
       // Step 1: Validate file
-      const validation = await documentAgent.generate(
+      const validation = await documentAgent.generateLegacy(
         `Validate and process the uploaded contract file:
         - File name: ${input.fileName}
         - File size: ${input.fileSize} bytes
@@ -263,7 +263,7 @@ export async function executeDocumentAgent(
         documentType: input.mimeType.includes("wordprocessingml")
           ? "docx"
           : "digital_pdf",
-        pageCount: 0, // Will be updated by Parsing Agent
+        pageCount: 1, // Placeholder — refined by the Parsing Agent; schema requires a positive number
         metadata: {
           fileName: input.fileName,
           fileSize: input.fileSize,

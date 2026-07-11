@@ -21,7 +21,10 @@ const bin = existsSync(mastraBin) ? mastraBin : mastraBinAlt;
 
 const env = {
   ...process.env,
-  NODE_OPTIONS: `--import file:///${preloadPath}`,
+  // --conditions=development resolves @lexguard/* workspace packages to their
+  // live .ts source instead of the compiled dist/ output (see each package's
+  // package.json "exports" map), so Studio reflects source edits without a build.
+  NODE_OPTIONS: `--import file:///${preloadPath} --conditions=development`,
 };
 
 console.log("🚀 Starting Mastra Studio with globalThis.mastra preload fix...");

@@ -273,7 +273,7 @@ export async function executeParsingAgent(
         ? `Use extract_scanned_pdf for s3Key: "${input.s3Key}", contractId: "${input.contractId}"`
         : `Use extract_digital_pdf for s3Key: "${input.s3Key}", contractId: "${input.contractId}"`;
 
-      const result = await parsingAgent.generate(
+      const result = await parsingAgent.generateLegacy(
         `Parse the contract document and extract all clause-level content.
          Document type: ${input.documentType}
          S3 Key: ${input.s3Key}

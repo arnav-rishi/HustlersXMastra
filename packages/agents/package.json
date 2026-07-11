@@ -2,24 +2,26 @@
   "name": "@lexguard/agents",
   "version": "1.0.0",
   "private": true,
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    "./document-agent": "./src/document-agent.ts",
-    "./parsing-agent": "./src/parsing-agent.ts",
-    "./embedding-agent": "./src/embedding-agent.ts",
-    "./classification-agent": "./src/classification-agent.ts",
-    "./retrieval-agent": "./src/retrieval-agent.ts",
-    "./risk-agent": "./src/risk-agent.ts",
-    "./benchmark-agent": "./src/benchmark-agent.ts",
-    "./rewrite-agent": "./src/rewrite-agent.ts",
-    "./compliance-agent": "./src/compliance-agent.ts",
-    "./evaluation-agent": "./src/evaluation-agent.ts",
-    "./memory-agent": "./src/memory-agent.ts",
-    "./qa-agent": "./src/qa-agent.ts",
-    "./reporting-agent": "./src/reporting-agent.ts"
+    "./document-agent": { "types": "./dist/document-agent.d.ts", "development": "./src/document-agent.ts", "default": "./dist/document-agent.js" },
+    "./parsing-agent": { "types": "./dist/parsing-agent.d.ts", "development": "./src/parsing-agent.ts", "default": "./dist/parsing-agent.js" },
+    "./embedding-agent": { "types": "./dist/embedding-agent.d.ts", "development": "./src/embedding-agent.ts", "default": "./dist/embedding-agent.js" },
+    "./classification-agent": { "types": "./dist/classification-agent.d.ts", "development": "./src/classification-agent.ts", "default": "./dist/classification-agent.js" },
+    "./retrieval-agent": { "types": "./dist/retrieval-agent.d.ts", "development": "./src/retrieval-agent.ts", "default": "./dist/retrieval-agent.js" },
+    "./risk-agent": { "types": "./dist/risk-agent.d.ts", "development": "./src/risk-agent.ts", "default": "./dist/risk-agent.js" },
+    "./benchmark-agent": { "types": "./dist/benchmark-agent.d.ts", "development": "./src/benchmark-agent.ts", "default": "./dist/benchmark-agent.js" },
+    "./rewrite-agent": { "types": "./dist/rewrite-agent.d.ts", "development": "./src/rewrite-agent.ts", "default": "./dist/rewrite-agent.js" },
+    "./compliance-agent": { "types": "./dist/compliance-agent.d.ts", "development": "./src/compliance-agent.ts", "default": "./dist/compliance-agent.js" },
+    "./evaluation-agent": { "types": "./dist/evaluation-agent.d.ts", "development": "./src/evaluation-agent.ts", "default": "./dist/evaluation-agent.js" },
+    "./memory-agent": { "types": "./dist/memory-agent.d.ts", "development": "./src/memory-agent.ts", "default": "./dist/memory-agent.js" },
+    "./qa-agent": { "types": "./dist/qa-agent.d.ts", "development": "./src/qa-agent.ts", "default": "./dist/qa-agent.js" },
+    "./reporting-agent": { "types": "./dist/reporting-agent.d.ts", "development": "./src/reporting-agent.ts", "default": "./dist/reporting-agent.js" }
   },
   "scripts": {
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "@ai-sdk/azure": "^1.1.0",
