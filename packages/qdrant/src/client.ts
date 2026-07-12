@@ -111,9 +111,23 @@ export class LexGuardQdrantClient {
 
   constructor() {
     const env = getEnv();
+    // @qdrant/js-client-rest defaults to port 6333 regardless of what's in
+    // `url`, ignoring the URL's own implicit scheme port — breaks against any
+    // HTTPS endpoint that only exposes 443 (e.g. Azure Container Apps
+    // external ingress, which terminates TLS on 443 and proxies internally
+    // to the container's actual 6333; hitting 6333 directly from outside
+    // times out). Derive the real port from the URL instead of trusting the
+    // library's default.
+    const parsedUrl = new URL(env.QDRANT_URL);
+    const port = parsedUrl.port
+      ? Number(parsedUrl.port)
+      : parsedUrl.protocol === "https:"
+        ? 443
+        : 6333;
     this.client = new QdrantBaseClient({
       url: env.QDRANT_URL,
       apiKey: env.QDRANT_API_KEY,
+      port,
     });
   }
 

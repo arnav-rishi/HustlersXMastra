@@ -2,9 +2,11 @@
 # LexGuard AI — Azure Container Apps deployment
 #
 # Orchestrates the two-phase deploy described in DEPLOYMENT.md:
-#   1. base.bicep  — Container Apps Environment, ACR, Postgres, Redis, Qdrant
-#   2. az acr build — builds api/web images server-side (no local docker push)
-#   3. apps.bicep  — api (internal-only) + web (external) container apps
+#   1. base.bicep  — Container Apps Environment, ACR, Postgres, Redis, Qdrant, Jaeger
+#   2. az acr build — builds api/web/otel-collector/prometheus/grafana images
+#      server-side (no local docker push)
+#   3. apps.bicep  — api, web (external), otel-collector, prometheus, grafana
+#      (Jaeger UI + Grafana are external; everything else internal-only)
 #
 # This script has NOT been run against a live subscription (no Azure CLI
 # available in the environment it was written in). Read it before running it,
@@ -26,6 +28,7 @@
 #   AZURE_OPENAI_DEPLOYMENT
 #   AZURE_OPENAI_EMBEDDING_DEPLOYMENT
 #   JWT_PUBLIC_KEY_PATH       path to apps/api/keys/public.pem (generate per README if missing)
+#   GRAFANA_ADMIN_PASSWORD    pick a strong password — Grafana is externally reachable
 #
 # Optional:
 #   NAME_PREFIX               default "lexguard"
@@ -44,6 +47,7 @@ set -euo pipefail
 : "${AZURE_OPENAI_DEPLOYMENT:?Set AZURE_OPENAI_DEPLOYMENT}"
 : "${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:?Set AZURE_OPENAI_EMBEDDING_DEPLOYMENT}"
 : "${JWT_PUBLIC_KEY_PATH:?Set JWT_PUBLIC_KEY_PATH (path to public.pem)}"
+: "${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD}"
 
 NAME_PREFIX="${NAME_PREFIX:-lexguard}"
 AZURE_OPENAI_DEPLOYMENT_MINI="${AZURE_OPENAI_DEPLOYMENT_MINI:-}"
@@ -57,13 +61,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 echo "== Phase 0: resource group =="
-az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --output none
+# az group create errors if the group already exists in a *different*
+# location than the one passed in — even though a resource group's own
+# region is just metadata and doesn't restrict which region the resources
+# deployed into it can use. Reuse the existing group as-is if present instead
+# of trying to "recreate" it with a possibly-different LOCATION.
+if az group show --name "$RESOURCE_GROUP" >/dev/null 2>&1; then
+  echo "Resource group $RESOURCE_GROUP already exists — reusing it."
+else
+  az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --output none
+fi
 
-echo "== Phase 1: base infrastructure (Container Apps Env, ACR, Postgres, Redis, Qdrant) =="
+echo "== Phase 1: base infrastructure (Container Apps Env, ACR, Postgres, Redis, Qdrant, Jaeger) =="
 BASE_OUT=$(az deployment group create \
   --resource-group "$RESOURCE_GROUP" \
   --template-file "$SCRIPT_DIR/base.bicep" \
   --parameters namePrefix="$NAME_PREFIX" \
+               location="$LOCATION" \
                postgresAdminPassword="$POSTGRES_ADMIN_PASSWORD" \
                qdrantApiKey="$QDRANT_API_KEY" \
   --query properties.outputs -o json)
@@ -76,15 +90,24 @@ CONTAINER_APPS_ENV_DEFAULT_DOMAIN=$(echo "$BASE_OUT" | jq -r '.containerAppsEnvD
 DATABASE_URL=$(echo "$BASE_OUT" | jq -r '.postgresDatabaseUrl.value')
 REDIS_URL=$(echo "$BASE_OUT" | jq -r '.redisUrl.value')
 QDRANT_INTERNAL_URL=$(echo "$BASE_OUT" | jq -r '.qdrantInternalUrl.value')
+JAEGER_EXTERNAL_FQDN=$(echo "$BASE_OUT" | jq -r '.jaegerExternalFqdn.value')
+JAEGER_OTLP_ENDPOINT=$(echo "$BASE_OUT" | jq -r '.jaegerInternalOtlpEndpoint.value')
 
 # Container Apps' internal-ingress FQDN is deterministic: <app-name>.internal.<env-default-domain>.
-# Knowing this up front means the api app doesn't need to exist yet before
-# building the web image with the correct proxy target baked in.
+# Knowing this up front means these apps don't need to exist yet before
+# building images that bake in a proxy/scrape target pointing at them.
 API_INTERNAL_FQDN="${NAME_PREFIX}-api.internal.${CONTAINER_APPS_ENV_DEFAULT_DOMAIN}"
+OTEL_COLLECTOR_INTERNAL_FQDN="${NAME_PREFIX}-otel-collector.internal.${CONTAINER_APPS_ENV_DEFAULT_DOMAIN}"
+PROMETHEUS_INTERNAL_FQDN="${NAME_PREFIX}-prometheus.internal.${CONTAINER_APPS_ENV_DEFAULT_DOMAIN}"
+# External-ingress apps use <app-name>.<default-domain> (no ".internal." segment).
+# Grafana doesn't exist yet at this point (it's deployed in Phase 3), but its
+# FQDN is deterministic, so the web image can bake in a working link now.
+GRAFANA_EXTERNAL_FQDN="${NAME_PREFIX}-grafana.${CONTAINER_APPS_ENV_DEFAULT_DOMAIN}"
 
 echo "ACR: $ACR_LOGIN_SERVER"
 echo "Qdrant internal URL: $QDRANT_INTERNAL_URL"
 echo "api will be reachable internally at: http://$API_INTERNAL_FQDN"
+echo "Jaeger UI: https://$JAEGER_EXTERNAL_FQDN"
 
 echo "== Phase 2a: build+push api image (server-side, via ACR Tasks) =="
 az acr build \
@@ -100,20 +123,51 @@ az acr build \
   --file "$REPO_ROOT/apps/web/Dockerfile" \
   --build-arg NEXT_PUBLIC_API_BASE_URL= \
   --build-arg API_INTERNAL_URL="http://$API_INTERNAL_FQDN" \
+  --build-arg NEXT_PUBLIC_GRAFANA_URL="https://$GRAFANA_EXTERNAL_FQDN" \
+  --build-arg NEXT_PUBLIC_JAEGER_URL="https://$JAEGER_EXTERNAL_FQDN" \
   "$REPO_ROOT"
 
-echo "== Phase 3: deploy api + web container apps =="
+echo "== Phase 2c: build+push otel-collector image =="
+az acr build \
+  --registry "$ACR_NAME" \
+  --image "lexguard-otel-collector:$IMAGE_TAG" \
+  --file "$REPO_ROOT/infra/otel/Dockerfile" \
+  "$REPO_ROOT"
+
+echo "== Phase 2d: build+push prometheus image =="
+az acr build \
+  --registry "$ACR_NAME" \
+  --image "lexguard-prometheus:$IMAGE_TAG" \
+  --file "$REPO_ROOT/infra/prometheus/Dockerfile" \
+  --build-arg OTEL_COLLECTOR_TARGET="$OTEL_COLLECTOR_INTERNAL_FQDN:8888" \
+  "$REPO_ROOT"
+
+echo "== Phase 2e: build+push grafana image =="
+az acr build \
+  --registry "$ACR_NAME" \
+  --image "lexguard-grafana:$IMAGE_TAG" \
+  --file "$REPO_ROOT/infra/grafana/Dockerfile" \
+  --build-arg PROMETHEUS_TARGET="http://$PROMETHEUS_INTERNAL_FQDN:9090" \
+  "$REPO_ROOT"
+
+echo "== Phase 3: deploy api, web, otel-collector, prometheus, grafana container apps =="
 JWT_PUBLIC_KEY_PEM="$(cat "$JWT_PUBLIC_KEY_PATH")"
 
 APPS_OUT=$(az deployment group create \
   --resource-group "$RESOURCE_GROUP" \
   --template-file "$SCRIPT_DIR/apps.bicep" \
   --parameters namePrefix="$NAME_PREFIX" \
+               location="$LOCATION" \
                acrLoginServer="$ACR_LOGIN_SERVER" \
                acrPullIdentityId="$ACR_PULL_IDENTITY_ID" \
                containerAppsEnvId="$CONTAINER_APPS_ENV_ID" \
                apiImageTag="$IMAGE_TAG" \
                webImageTag="$IMAGE_TAG" \
+               otelCollectorImageTag="$IMAGE_TAG" \
+               prometheusImageTag="$IMAGE_TAG" \
+               grafanaImageTag="$IMAGE_TAG" \
+               jaegerOtlpEndpoint="$JAEGER_OTLP_ENDPOINT" \
+               grafanaAdminPassword="$GRAFANA_ADMIN_PASSWORD" \
                databaseUrl="$DATABASE_URL" \
                redisUrl="$REDIS_URL" \
                qdrantInternalUrl="$QDRANT_INTERNAL_URL" \
@@ -132,11 +186,14 @@ APPS_OUT=$(az deployment group create \
 
 WEB_FQDN=$(echo "$APPS_OUT" | jq -r '.webFqdn.value')
 API_FQDN=$(echo "$APPS_OUT" | jq -r '.apiInternalFqdn.value')
+GRAFANA_FQDN=$(echo "$APPS_OUT" | jq -r '.grafanaFqdn.value')
 
 echo ""
 echo "== Done =="
 echo "Web:          https://$WEB_FQDN"
 echo "API (internal, not publicly reachable): $API_FQDN"
+echo "Grafana:      https://$GRAFANA_FQDN  (user: admin)"
+echo "Jaeger:       https://$JAEGER_EXTERNAL_FQDN"
 echo ""
 if [ "$API_FQDN" != "$API_INTERNAL_FQDN" ]; then
   echo "NOTE: the web image was built assuming API_INTERNAL_URL=http://$API_INTERNAL_FQDN"
@@ -145,5 +202,5 @@ if [ "$API_FQDN" != "$API_INTERNAL_FQDN" ]; then
   echo "      to rebuild web with the correct address baked in."
 fi
 echo ""
-echo "Next: run 'pnpm db:migrate' and 'pnpm qdrant:init' against this environment"
-echo "(see DEPLOYMENT.md) before using the app."
+echo "Next: run 'pnpm --filter @lexguard/api db:migrate:deploy' and 'pnpm qdrant:init'"
+echo "against this environment (see DEPLOYMENT.md) before using the app."
