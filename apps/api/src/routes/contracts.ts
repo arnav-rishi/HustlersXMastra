@@ -184,13 +184,13 @@ contractsRouter.post(
       // actually read and analyze the uploaded document (see LOCAL_UPLOAD_DIR
       // comment above) instead of operating on hardcoded mock content.
       const contractId = uuidv4();
-      const localDir = path.join(LOCAL_UPLOAD_DIR, req.orgId!, contractId);
-      fs.mkdirSync(localDir, { recursive: true });
-      const localFilePath = path.join(localDir, req.file.originalname);
-      fs.writeFileSync(localFilePath, req.file.buffer);
+      const actualS3Key = `${req.orgId}/contracts/${contractId}/${req.file.originalname}`;
+      const absolutePath = path.resolve(process.cwd(), actualS3Key);
+      fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+      fs.writeFileSync(absolutePath, req.file.buffer);
 
-      const s3Key = localFilePath;
-      const rawFileUrl = pathToFileURL(localFilePath).href;
+      const s3Key = actualS3Key;
+      const rawFileUrl = pathToFileURL(absolutePath).href;
 
       const createdContract = await createQueuedContract({
         id: contractId,
@@ -288,16 +288,23 @@ contractsRouter.post(
 
     const contractText = body.data.contractText;
     try {
-      const s3Key = `${req.orgId}/${uuidv4()}/${body.data.fileName ?? "inline-contract.txt"}`;
+      const fileName = body.data.fileName ?? "inline-contract.txt";
+      const tempS3Key = `${req.orgId}/${uuidv4()}/${fileName}`;
+      
       const createdContract = await createQueuedContract({
         orgId: req.orgId!,
         uploadedBy: req.user!.sub,
-        fileName: body.data.fileName ?? "inline-contract.txt",
+        fileName,
         fileSize: Buffer.byteLength(contractText, "utf8"),
         mimeType: "text/plain",
         jurisdiction: body.data.jurisdiction,
-        s3Key,
+        s3Key: tempS3Key,
       });
+
+      const actualS3Key = `${req.orgId}/contracts/${createdContract.id}/${fileName}`;
+      const absolutePath = path.resolve(process.cwd(), actualS3Key);
+      fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+      fs.writeFileSync(absolutePath, contractText, "utf8");
 
       const { workflowId, contractId } = await triggerContractAnalysis({
         contractId: createdContract.id,
