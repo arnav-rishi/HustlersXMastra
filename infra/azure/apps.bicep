@@ -68,6 +68,9 @@ param jwtPublicKeyPem string
 param jwtIssuer string = 'https://api.lexguard.ai'
 param jwtAudience string = 'lexguard-api'
 
+@description('Bypasses real JWT verification (apps/api/src/middleware/auth.ts) and injects a fake authenticated admin user on every request. Purpose-built dev/demo escape hatch already in the codebase — appropriate for demonstrating the agent pipeline, NOT for anything handling real customer data/auth. Set to "false" once real signed JWTs are wired up for this environment.')
+param devBypassAuth string = 'true'
+
 param enkryptEnabled string = 'false'
 param lexisNexisEnabled string = 'false'
 param hitlEnabled string = 'true'
@@ -153,6 +156,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'API_PORT', value: '4000' }
             { name: 'API_HOST', value: '0.0.0.0' }
             { name: 'ALLOWED_ORIGINS', value: allowedOrigins }
+            { name: 'LEXGUARD_DEV_BYPASS_AUTH', value: devBypassAuth }
             { name: 'ENKRYPT_ENABLED', value: enkryptEnabled }
             { name: 'LEXISNEXIS_ENABLED', value: lexisNexisEnabled }
             { name: 'HITL_ENABLED', value: hitlEnabled }
