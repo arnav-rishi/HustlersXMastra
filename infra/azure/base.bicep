@@ -236,6 +236,13 @@ resource qdrant 'Microsoft.App/containerApps@2024-03-01' = {
         external: false
         targetPort: 6333
         transport: 'http'
+        // Container Apps ingress defaults to forcing HTTP->HTTPS redirects
+        // even on internal-only ingress. api reaches this over plain
+        // http://<internal-fqdn> (see QDRANT_URL in apps.bicep) — without
+        // this, that call 301s and breaks the caller. Found live: the same
+        // gap on apiApp's ingress caused CORS errors in the browser (see
+        // DEPLOYMENT.md).
+        allowInsecure: true
       }
       secrets: [
         { name: 'qdrant-api-key', value: qdrantApiKey }
@@ -291,6 +298,11 @@ resource jaeger 'Microsoft.App/containerApps@2024-03-01' = {
         external: true
         targetPort: 16686
         transport: 'http'
+        // Not confirmed whether allowInsecure affects additionalPortMappings
+        // (vs. only the primary ingress port) — set defensively since
+        // otel-collector's exporter config expects a plaintext gRPC
+        // connection on the mapped port (tls: insecure: true).
+        allowInsecure: true
         additionalPortMappings: [
           {
             targetPort: 4317

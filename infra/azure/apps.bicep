@@ -101,6 +101,12 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
         external: false
         targetPort: 4000
         transport: 'http'
+        // CONFIRMED LIVE BUG without this: Container Apps ingress defaults
+        // to forcing HTTP->HTTPS redirects even on internal-only ingress.
+        // web's Next.js server reaches this over plain http://<internal-fqdn>
+        // (baked in as API_INTERNAL_URL) — that 301 was surfacing to the
+        // browser as CORS errors on every API call. See DEPLOYMENT.md.
+        allowInsecure: true
       }
       registries: [
         { server: acrLoginServer, identity: acrPullIdentityId }
@@ -227,6 +233,9 @@ resource otelCollectorApp 'Microsoft.App/containerApps@2024-03-01' = {
         external: false
         targetPort: 4318
         transport: 'http'
+        // See allowInsecure comment on apiApp above — same fix, api reaches
+        // this over plain http://<internal-fqdn>.
+        allowInsecure: true
         // Prometheus needs to reach the collector's own metrics-exporter
         // port (8888, see infra/otel/collector-config.yml's `prometheus`
         // exporter) separately from the OTLP receiver port (4318) that api
@@ -271,6 +280,9 @@ resource prometheusApp 'Microsoft.App/containerApps@2024-03-01' = {
         external: false
         targetPort: 9090
         transport: 'http'
+        // See allowInsecure comment on apiApp above — same fix, grafana
+        // reaches this over plain http://<internal-fqdn>.
+        allowInsecure: true
       }
       registries: [
         { server: acrLoginServer, identity: acrPullIdentityId }
