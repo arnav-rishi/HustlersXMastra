@@ -112,18 +112,24 @@ export class LexGuardQdrantClient {
   constructor() {
     const env = getEnv();
     // @qdrant/js-client-rest defaults to port 6333 regardless of what's in
-    // `url`, ignoring the URL's own implicit scheme port — breaks against any
-    // HTTPS endpoint that only exposes 443 (e.g. Azure Container Apps
-    // external ingress, which terminates TLS on 443 and proxies internally
-    // to the container's actual 6333; hitting 6333 directly from outside
-    // times out). Derive the real port from the URL instead of trusting the
-    // library's default.
+    // `url`, ignoring the URL's own implicit scheme port. That default is
+    // wrong for BOTH Azure ingress cases:
+    //   - external HTTPS (e.g. cloud-shell qdrant:init): ingress on 443
+    //   - internal HTTP (api -> qdrant): Container Apps ingress listens on
+    //     port 80 and forwards to the container's targetPort 6333 internally
+    //     — connecting to 6333 on the ingress FQDN times out (nothing there).
+    // So: use the URL's explicit port if present (local docker-compose uses
+    // :6333 directly), otherwise the scheme's real default port the ingress
+    // actually listens on (80 for http, 443 for https) — never the
+    // container-internal 6333. This wrong default was the cause of api's
+    // /ready probe failing on qdrant -> 0 ready replicas -> whole API
+    // returning Azure's "Container App - Unavailable" page.
     const parsedUrl = new URL(env.QDRANT_URL);
     const port = parsedUrl.port
       ? Number(parsedUrl.port)
       : parsedUrl.protocol === "https:"
         ? 443
-        : 6333;
+        : 80;
     this.client = new QdrantBaseClient({
       url: env.QDRANT_URL,
       apiKey: env.QDRANT_API_KEY,

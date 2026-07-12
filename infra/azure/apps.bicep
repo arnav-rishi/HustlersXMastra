@@ -171,10 +171,22 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
               periodSeconds: 15
             }
             {
+              // Readiness gates whether this replica gets traffic. Points at
+              // /health (200 whenever the HTTP server is listening), NOT
+              // /ready — /ready returns 503 if postgres/redis/qdrant is
+              // degraded, which would pull EVERY replica out of rotation and
+              // make the whole API return Azure's "Container App -
+              // Unavailable" page for all requests (confirmed live: a single
+              // failing qdrant check took the entire API offline). Downstream
+              // health is a monitoring concern (/ready still exists for that,
+              // and per-request failures surface as normal 5xx), not a reason
+              // to refuse all traffic. failureThreshold is generous so a slow
+              // cold start doesn't flap the replica out.
               type: 'Readiness'
-              httpGet: { path: '/ready', port: 4000 }
-              initialDelaySeconds: 10
-              periodSeconds: 15
+              httpGet: { path: '/health', port: 4000 }
+              initialDelaySeconds: 5
+              periodSeconds: 10
+              failureThreshold: 6
             }
           ]
         }
