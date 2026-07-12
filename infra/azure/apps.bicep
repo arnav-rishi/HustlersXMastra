@@ -37,8 +37,9 @@ param webImageTag string
 @secure()
 param databaseUrl string
 
-@secure()
-param redisUrl string
+// Redis runs as a sidecar container inside apiApp below (localhost:6379) —
+// no param needed. See base.bicep for why: TCP-transport internal ingress
+// was confirmed live to time out between container apps in this environment.
 
 param qdrantInternalUrl string
 
@@ -113,7 +114,6 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
       ]
       secrets: [
         { name: 'database-url', value: databaseUrl }
-        { name: 'redis-url', value: redisUrl }
         { name: 'qdrant-api-key', value: qdrantApiKey }
         { name: 'azure-openai-api-key', value: azureOpenAiApiKey }
         { name: 'jwt-public-key-pem', value: jwtPublicKeyPem }
@@ -128,7 +128,10 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
           env: [
             { name: 'NODE_ENV', value: 'production' }
             { name: 'DATABASE_URL', secretRef: 'database-url' }
-            { name: 'REDIS_URL', secretRef: 'redis-url' }
+            // Redis is a sidecar container in this same app (see the
+            // `redis` container below) — same revision, same network
+            // namespace, reachable at localhost with no ingress involved.
+            { name: 'REDIS_URL', value: 'redis://localhost:6379' }
             { name: 'QDRANT_URL', value: qdrantInternalUrl }
             { name: 'QDRANT_API_KEY', secretRef: 'qdrant-api-key' }
             { name: 'AZURE_OPENAI_API_KEY', secretRef: 'azure-openai-api-key' }
@@ -170,8 +173,19 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             }
           ]
         }
+        {
+          name: 'redis'
+          image: 'redis:7-alpine'
+          resources: { cpu: json('0.5'), memory: '1Gi' }
+        }
       ]
-      scale: { minReplicas: 1, maxReplicas: 3 }
+      // Capped at 1 replica: redis runs as a sidecar in this same app now
+      // (see above), so every replica would otherwise get its own
+      // independent, unsynchronized Redis instance — breaking shared
+      // rate-limiting/circuit-breaker state across replicas. Revisit if
+      // this ever needs to scale beyond one instance (would need a real
+      // shared Redis reachable by all replicas instead).
+      scale: { minReplicas: 1, maxReplicas: 1 }
     }
   }
 }

@@ -188,41 +188,16 @@ resource postgresFirewallAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewa
   }
 }
 
-// ─── Redis (self-hosted container app, internal-only ingress) ────────────────
-// Classic "Azure Cache for Redis" (Microsoft.Cache/redis) is retired for new
-// deployments in this subscription/region ("Azure Cache for Redis is
-// retiring, create Azure Managed Redis instance instead" — hit live during
-// deployment). Its replacement, Azure Managed Redis, uses a different,
-// unverified-here Bicep schema. Self-hosting the same redis:7-alpine image
-// apps/docker-compose.yml already uses locally avoids that risk entirely and
-// reuses the exact pattern already proven to work for Qdrant below. No auth
-// configured — this container has internal-only ingress, unreachable outside
-// the Container Apps Environment's private network (same trust boundary as
-// Postgres's Azure-services-only firewall rule above).
-resource redis 'Microsoft.App/containerApps@2024-03-01' = {
-  name: '${namePrefix}-redis'
-  location: location
-  properties: {
-    managedEnvironmentId: containerAppsEnv.id
-    configuration: {
-      ingress: {
-        external: false
-        targetPort: 6379
-        transport: 'tcp'
-      }
-    }
-    template: {
-      containers: [
-        {
-          name: 'redis'
-          image: 'redis:7-alpine'
-          resources: { cpu: json('0.5'), memory: '1Gi' }
-        }
-      ]
-      scale: { minReplicas: 1, maxReplicas: 1 }
-    }
-  }
-}
+// Redis previously lived here as its own Container App with TCP-transport
+// internal ingress. Removed: TCP-transport internal ingress was confirmed
+// live to time out on every connection attempt from another container app
+// in the same environment — tried both default and explicit `exposedPort`,
+// neither worked (HTTP-transport internal ingress, e.g. Qdrant below, works
+// fine — this looked like a platform limitation with TCP ingress on this
+// Container Apps Environment, which has no VNet/Workload Profile
+// configured). Redis now runs as a sidecar container inside the api
+// Container App itself (see apps.bicep) — same revision, same network
+// namespace, reachable at localhost:6379, no ingress involved at all.
 
 // ─── Qdrant (self-hosted container app, internal-only ingress) ───────────────
 
@@ -337,8 +312,6 @@ output containerAppsEnvId string = containerAppsEnv.id
 output containerAppsEnvDefaultDomain string = containerAppsEnv.properties.defaultDomain
 output postgresHost string = postgres.properties.fullyQualifiedDomainName
 output postgresDatabaseUrl string = 'postgresql://${postgresAdminUsername}:${postgresAdminPassword}@${postgres.properties.fullyQualifiedDomainName}:5432/${postgresDatabaseName}?sslmode=require'
-output redisHost string = redis.properties.configuration.ingress.fqdn
-output redisUrl string = 'redis://${redis.properties.configuration.ingress.fqdn}:6379'
 output qdrantInternalUrl string = 'http://${qdrant.properties.configuration.ingress.fqdn}'
 output jaegerExternalFqdn string = jaeger.properties.configuration.ingress.fqdn
 output jaegerInternalOtlpEndpoint string = '${jaeger.properties.configuration.ingress.fqdn}:4317'
