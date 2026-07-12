@@ -38,6 +38,28 @@
 #   AZURE_OPENAI_DEPLOYMENT_MINI
 #   AZURE_OPENAI_API_VERSION
 #   ENKRYPT_ENABLED / LEXISNEXIS_ENABLED / HITL_ENABLED  default false/false/true
+#   SKIP_BUILD=true           skip all 5 `az acr build` calls (Phase 2) and
+#                             redeploy Bicep only, reusing an existing image
+#                             tag (REUSE_IMAGE_TAG, required if SKIP_BUILD=true).
+#                             Use this for config-only changes (env vars,
+#                             ingress settings, secrets) — much faster than a
+#                             full rebuild, and avoids the image tag drifting
+#                             from what's actually needed.
+#   REUSE_IMAGE_TAG           image tag to redeploy when SKIP_BUILD=true, e.g.
+#                             the output of:
+#                             az containerapp show --name lexguard-api \
+#                               --resource-group <rg> \
+#                               --query "properties.template.containers[0].image" -o tsv
+#                             (take just the tag after the colon)
+#
+# IMPORTANT: QDRANT_API_KEY should be a value YOU pick once and reuse across
+# every deploy.sh run for a given environment — NOT regenerated fresh each
+# time. Qdrant is a stable, non-recreated resource across redeploys; passing
+# a different QDRANT_API_KEY on a later run updates Qdrant's secret AND api's
+# env together within that one run, but if any run only partially completes,
+# they can drift out of sync (confirmed live: api's next embedding step
+# started failing with "Unauthorized: Invalid API key or JWT" against Qdrant
+# after an interrupted run). Pick one value and keep exporting the same one.
 
 set -euo pipefail
 
@@ -58,7 +80,13 @@ AZURE_OPENAI_API_VERSION="${AZURE_OPENAI_API_VERSION:-2024-10-01-preview}"
 ENKRYPT_ENABLED="${ENKRYPT_ENABLED:-false}"
 LEXISNEXIS_ENABLED="${LEXISNEXIS_ENABLED:-false}"
 HITL_ENABLED="${HITL_ENABLED:-true}"
-IMAGE_TAG="$(date +%Y%m%d%H%M%S)"
+SKIP_BUILD="${SKIP_BUILD:-false}"
+if [ "$SKIP_BUILD" = "true" ]; then
+  : "${REUSE_IMAGE_TAG:?SKIP_BUILD=true requires REUSE_IMAGE_TAG}"
+  IMAGE_TAG="$REUSE_IMAGE_TAG"
+else
+  IMAGE_TAG="$(date +%Y%m%d%H%M%S)"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -115,48 +143,52 @@ echo "Qdrant internal URL: $QDRANT_INTERNAL_URL"
 echo "api will be reachable at: https://$API_EXTERNAL_FQDN"
 echo "Jaeger UI: https://$JAEGER_EXTERNAL_FQDN"
 
-echo "== Phase 2a: build+push api image (server-side, via ACR Tasks) =="
-az acr build \
-  --registry "$ACR_NAME" \
-  --image "lexguard-api:$IMAGE_TAG" \
-  --file "$REPO_ROOT/apps/api/Dockerfile" \
-  "$REPO_ROOT"
+if [ "$SKIP_BUILD" = "true" ]; then
+  echo "== Phase 2: skipped (SKIP_BUILD=true) — reusing image tag $IMAGE_TAG =="
+else
+  echo "== Phase 2a: build+push api image (server-side, via ACR Tasks) =="
+  az acr build \
+    --registry "$ACR_NAME" \
+    --image "lexguard-api:$IMAGE_TAG" \
+    --file "$REPO_ROOT/apps/api/Dockerfile" \
+    "$REPO_ROOT"
 
-echo "== Phase 2b: build+push web image =="
-az acr build \
-  --registry "$ACR_NAME" \
-  --image "lexguard-web:$IMAGE_TAG" \
-  --file "$REPO_ROOT/apps/web/Dockerfile" \
-  --build-arg NEXT_PUBLIC_API_BASE_URL="https://$API_EXTERNAL_FQDN" \
-  --build-arg API_INTERNAL_URL="http://$API_INTERNAL_FQDN" \
-  --build-arg NEXT_PUBLIC_GRAFANA_URL="https://$GRAFANA_EXTERNAL_FQDN" \
-  --build-arg NEXT_PUBLIC_JAEGER_URL="https://$JAEGER_EXTERNAL_FQDN" \
-  --build-arg NEXT_PUBLIC_DEV_TENANT_ID="00000000-0000-0000-0000-000000000001" \
-  --build-arg NEXT_PUBLIC_DEV_AUTH_TOKEN="dev-bypass-token" \
-  "$REPO_ROOT"
+  echo "== Phase 2b: build+push web image =="
+  az acr build \
+    --registry "$ACR_NAME" \
+    --image "lexguard-web:$IMAGE_TAG" \
+    --file "$REPO_ROOT/apps/web/Dockerfile" \
+    --build-arg NEXT_PUBLIC_API_BASE_URL="https://$API_EXTERNAL_FQDN" \
+    --build-arg API_INTERNAL_URL="http://$API_INTERNAL_FQDN" \
+    --build-arg NEXT_PUBLIC_GRAFANA_URL="https://$GRAFANA_EXTERNAL_FQDN" \
+    --build-arg NEXT_PUBLIC_JAEGER_URL="https://$JAEGER_EXTERNAL_FQDN" \
+    --build-arg NEXT_PUBLIC_DEV_TENANT_ID="00000000-0000-0000-0000-000000000001" \
+    --build-arg NEXT_PUBLIC_DEV_AUTH_TOKEN="dev-bypass-token" \
+    "$REPO_ROOT"
 
-echo "== Phase 2c: build+push otel-collector image =="
-az acr build \
-  --registry "$ACR_NAME" \
-  --image "lexguard-otel-collector:$IMAGE_TAG" \
-  --file "$REPO_ROOT/infra/otel/Dockerfile" \
-  "$REPO_ROOT"
+  echo "== Phase 2c: build+push otel-collector image =="
+  az acr build \
+    --registry "$ACR_NAME" \
+    --image "lexguard-otel-collector:$IMAGE_TAG" \
+    --file "$REPO_ROOT/infra/otel/Dockerfile" \
+    "$REPO_ROOT"
 
-echo "== Phase 2d: build+push prometheus image =="
-az acr build \
-  --registry "$ACR_NAME" \
-  --image "lexguard-prometheus:$IMAGE_TAG" \
-  --file "$REPO_ROOT/infra/prometheus/Dockerfile" \
-  --build-arg OTEL_COLLECTOR_TARGET="$OTEL_COLLECTOR_INTERNAL_FQDN:8888" \
-  "$REPO_ROOT"
+  echo "== Phase 2d: build+push prometheus image =="
+  az acr build \
+    --registry "$ACR_NAME" \
+    --image "lexguard-prometheus:$IMAGE_TAG" \
+    --file "$REPO_ROOT/infra/prometheus/Dockerfile" \
+    --build-arg OTEL_COLLECTOR_TARGET="$OTEL_COLLECTOR_INTERNAL_FQDN:8888" \
+    "$REPO_ROOT"
 
-echo "== Phase 2e: build+push grafana image =="
-az acr build \
-  --registry "$ACR_NAME" \
-  --image "lexguard-grafana:$IMAGE_TAG" \
-  --file "$REPO_ROOT/infra/grafana/Dockerfile" \
-  --build-arg PROMETHEUS_TARGET="http://$PROMETHEUS_INTERNAL_FQDN:9090" \
-  "$REPO_ROOT"
+  echo "== Phase 2e: build+push grafana image =="
+  az acr build \
+    --registry "$ACR_NAME" \
+    --image "lexguard-grafana:$IMAGE_TAG" \
+    --file "$REPO_ROOT/infra/grafana/Dockerfile" \
+    --build-arg PROMETHEUS_TARGET="http://$PROMETHEUS_INTERNAL_FQDN:9090" \
+    "$REPO_ROOT"
+fi
 
 echo "== Phase 3: deploy api, web, otel-collector, prometheus, grafana container apps =="
 JWT_PUBLIC_KEY_PEM="$(cat "$JWT_PUBLIC_KEY_PATH")"
