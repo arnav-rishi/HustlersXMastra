@@ -28,6 +28,8 @@
     "@mastra/core": "^1.50.0",
     "openai": "^4.52.0",
     "uuid": "^10.0.0",
+    "pdf-parse": "^1.1.1",
+    "mammoth": "^1.8.0",
     "@lexguard/shared": "workspace:*",
     "@lexguard/enkrypt": "workspace:*",
     "@lexguard/observability": "workspace:*",
@@ -36,6 +38,7 @@
   },
   "devDependencies": {
     "@types/uuid": "^10.0.0",
+    "@types/pdf-parse": "^1.1.4",
     "typescript": "^5.4.5"
   }
 }

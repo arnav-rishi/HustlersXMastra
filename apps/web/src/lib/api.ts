@@ -3,7 +3,7 @@
 // origin. next.config.mjs then proxies them server-side to API_INTERNAL_URL,
 // so the browser only ever talks to one origin — no CORS involved.
 export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
 export const DEV_TENANT_ID =
   process.env.NEXT_PUBLIC_DEV_TENANT_ID ?? "00000000-0000-0000-0000-000000000001";

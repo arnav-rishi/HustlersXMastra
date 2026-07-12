@@ -6,7 +6,7 @@
   "description": "LexGuard AI — Enterprise Legal Intelligence Platform",
   "scripts": {
     "build": "turbo run build",
-    "dev": "turbo run dev",
+    "dev": "dotenv -e .env.local -- turbo run dev",
     "dev:api": "dotenv -e .env.local -- pnpm --filter @lexguard/api dev",
     "dev:web": "pnpm --filter @lexguard/web dev",
     "dev:ui": "dotenv -e .env.local -- node scripts/start-mastra-studio.mjs",
