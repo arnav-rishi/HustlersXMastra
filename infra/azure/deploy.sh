@@ -131,6 +131,8 @@ az acr build \
   --build-arg API_INTERNAL_URL="http://$API_INTERNAL_FQDN" \
   --build-arg NEXT_PUBLIC_GRAFANA_URL="https://$GRAFANA_EXTERNAL_FQDN" \
   --build-arg NEXT_PUBLIC_JAEGER_URL="https://$JAEGER_EXTERNAL_FQDN" \
+  --build-arg NEXT_PUBLIC_DEV_TENANT_ID="00000000-0000-0000-0000-000000000001" \
+  --build-arg NEXT_PUBLIC_DEV_AUTH_TOKEN="dev-bypass-token" \
   "$REPO_ROOT"
 
 echo "== Phase 2c: build+push otel-collector image =="
