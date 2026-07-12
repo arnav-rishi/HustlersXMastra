@@ -11,6 +11,8 @@
  *   GET    /api/v1/contracts/hitl/queue      - HITL review queue
  *   GET    /api/v1/contracts/hitl/:id        - HITL review item detail
  *   POST   /api/v1/contracts/hitl/:id/decision - Submit HITL decision
+ *   DELETE /api/v1/contracts/:id             - Delete one contract (full DB + Qdrant wipeout)
+ *   DELETE /api/v1/contracts                 - Bulk delete ({ ids: [...] } or { all: true })
  *   DELETE /api/v1/gdpr/erase/:orgId         - GDPR erasure
  *   GET    /api/v1/audit/trace/:traceId      - OTel trace retrieval
  *
@@ -22,12 +24,10 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
 import type { Router as ExpressRouter } from "express";
 import multer from "multer";
+import pdfParse from "pdf-parse";
+import mammoth from "mammoth";
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
-import fs from "fs";
-import path from "path";
-import os from "os";
-import { pathToFileURL } from "url";
 import { authMiddleware, requireRole } from "../middleware/auth";
 import { triggerContractAnalysis } from "@lexguard/workflows/contract-analysis";
 import { executeQAAgent } from "@lexguard/agents/qa-agent";
@@ -40,16 +40,26 @@ import {
 } from "@lexguard/shared/schemas";
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
 import { getEnv } from "@lexguard/shared/env";
+import { getQdrantClient } from "@lexguard/qdrant/client";
+import { QDRANT_COLLECTIONS } from "@lexguard/shared/constants";
 
 export const contractsRouter: ExpressRouter = Router();
 const prisma = new PrismaClient();
 
-// Local dev storage shim: in production, contract files upload to S3 with
-// SSE-KMS (see store_to_s3 in document-agent.ts). Locally, there's no S3, so
-// we persist the real uploaded bytes to a temp directory and pass a file://
-// URL through the pipeline — this is what lets the Parsing Agent read and
-// analyze the ACTUAL uploaded document instead of mock data.
-const LOCAL_UPLOAD_DIR = path.join(os.tmpdir(), "lexguard-uploads");
+// Extracts real text from an uploaded file buffer so the analysis pipeline
+// works on actual document content instead of relying on S3 storage / OCR
+// integrations that aren't wired up in this deployment.
+async function extractTextFromBuffer(buffer: Buffer, mimeType: string): Promise<string> {
+  if (mimeType === "application/pdf") {
+    const result = await pdfParse(buffer);
+    return result.text;
+  }
+  if (mimeType.includes("wordprocessingml")) {
+    const result = await mammoth.extractRawText({ buffer });
+    return result.value;
+  }
+  return buffer.toString("utf-8");
+}
 
 // Wraps an async route handler so a rejected promise (e.g. a Prisma error from
 // a malformed :id) is forwarded to Express's error middleware instead of
@@ -70,7 +80,6 @@ function getDocumentTypeFromMime(mimeType: string): "DIGITAL_PDF" | "SCANNED_PDF
 }
 
 async function createQueuedContract(params: {
-  id: string;
   orgId: string;
   uploadedBy: string;
   fileName: string;
@@ -81,7 +90,6 @@ async function createQueuedContract(params: {
 }) {
   return prisma.contract.create({
     data: {
-      id: params.id,
       orgId: params.orgId,
       uploadedBy: params.uploadedBy,
       fileName: params.fileName,
@@ -128,6 +136,37 @@ async function createAuditLog(params: {
   }
 }
 
+// Permanently removes a contract and every trace of it: Qdrant vectors (clause
+// embeddings + linked Q&A conversation memory) are deleted first, then the
+// Postgres row — whose FK cascades (see schema.prisma onDelete: Cascade) wipe
+// Clause, WorkflowStageMetric, HitlQueueItem, and AuditLog rows in the same
+// statement. Qdrant deletion is best-effort: a Qdrant outage does not block
+// the Postgres wipeout, but is reported back so the caller knows to retry.
+async function deleteContractCompletely(
+  contractId: string
+): Promise<{ qdrantWiped: boolean; qdrantError?: string }> {
+  let qdrantWiped = true;
+  let qdrantError: string | undefined;
+  try {
+    const qdrant = getQdrantClient();
+    await qdrant.deleteByFilter(QDRANT_COLLECTIONS.CONTRACTS, {
+      must: [{ key: "contract_id", match: { value: contractId } }],
+    });
+    await qdrant.deleteByFilter(QDRANT_COLLECTIONS.CONVERSATION_MEMORY, {
+      must: [{ key: "linked_contract_id", match: { value: contractId } }],
+    });
+  } catch (err) {
+    qdrantWiped = false;
+    qdrantError = err instanceof Error ? err.message : String(err);
+    console.error(`[LexGuard][API] Qdrant wipeout failed for contract ${contractId}:`, err);
+  }
+
+  // Cascades to clauses, workflow_stage_metrics, hitl_queue, audit_logs.
+  await prisma.contract.delete({ where: { id: contractId } });
+
+  return { qdrantWiped, qdrantError };
+}
+
 // File upload middleware (memory storage; will stream to S3)
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -138,6 +177,7 @@ const upload = multer({
     const allowed = [
       "application/pdf",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "text/plain",
     ];
     if (allowed.includes(file.mimetype)) {
       callback(null, true);
@@ -179,21 +219,32 @@ contractsRouter.post(
         });
       }
 
-      // In production: upload file buffer to S3, get pre-signed URL.
-      // Locally: persist the real bytes to disk so downstream agents can
-      // actually read and analyze the uploaded document (see LOCAL_UPLOAD_DIR
-      // comment above) instead of operating on hardcoded mock content.
-      const contractId = uuidv4();
-      const actualS3Key = `${req.orgId}/contracts/${contractId}/${req.file.originalname}`;
-      const absolutePath = path.resolve(process.cwd(), actualS3Key);
-      fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
-      fs.writeFileSync(absolutePath, req.file.buffer);
+      // Extract real text from the uploaded file so analysis reflects the
+      // actual document instead of a mock. (In production this would also
+      // upload the raw buffer to S3 for storage; that isn't wired up here.)
+      let contractText: string;
+      try {
+        contractText = await extractTextFromBuffer(req.file.buffer, req.file.mimetype);
+      } catch (extractErr) {
+        console.error("[LexGuard][API] Text extraction failed:", extractErr);
+        return res.status(422).json({
+          error: "EXTRACTION_FAILED",
+          message: "Could not extract text from the uploaded file. It may be corrupted, scanned-image-only, or password-protected.",
+          code: "LG-UPLOAD-004",
+        });
+      }
+      if (!contractText.trim()) {
+        return res.status(422).json({
+          error: "EMPTY_DOCUMENT",
+          message: "No extractable text was found in the uploaded file (it may be a scanned image with no OCR support yet).",
+          code: "LG-UPLOAD-005",
+        });
+      }
 
-      const s3Key = actualS3Key;
-      const rawFileUrl = pathToFileURL(absolutePath).href;
+      const s3Key = `${req.orgId}/${uuidv4()}/${req.file.originalname}`;
+      const rawFileUrl = `https://${process.env.S3_BUCKET_NAME}.s3.amazonaws.com/${s3Key}`;
 
       const createdContract = await createQueuedContract({
-        id: contractId,
         orgId: req.orgId!,
         uploadedBy: req.user!.sub,
         fileName: req.file.originalname,
@@ -204,7 +255,7 @@ contractsRouter.post(
       });
 
       // Trigger the Mastra contract analysis workflow
-      const { workflowId } = await triggerContractAnalysis({
+      const { workflowId, contractId } = await triggerContractAnalysis({
         contractId: createdContract.id,
         orgId: req.orgId!,
         tenantId: req.tenantId!,
@@ -217,6 +268,7 @@ contractsRouter.post(
         priority: bodyResult.data.priority,
         traceId: req.traceId!,
         spanId: uuidv4(),
+        contractText,
       });
 
       await prisma.contract.update({
@@ -288,23 +340,16 @@ contractsRouter.post(
 
     const contractText = body.data.contractText;
     try {
-      const fileName = body.data.fileName ?? "inline-contract.txt";
-      const tempS3Key = `${req.orgId}/${uuidv4()}/${fileName}`;
-      
+      const s3Key = `${req.orgId}/${uuidv4()}/${body.data.fileName ?? "inline-contract.txt"}`;
       const createdContract = await createQueuedContract({
         orgId: req.orgId!,
         uploadedBy: req.user!.sub,
-        fileName,
+        fileName: body.data.fileName ?? "inline-contract.txt",
         fileSize: Buffer.byteLength(contractText, "utf8"),
         mimeType: "text/plain",
         jurisdiction: body.data.jurisdiction,
-        s3Key: tempS3Key,
+        s3Key,
       });
-
-      const actualS3Key = `${req.orgId}/contracts/${createdContract.id}/${fileName}`;
-      const absolutePath = path.resolve(process.cwd(), actualS3Key);
-      fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
-      fs.writeFileSync(absolutePath, contractText, "utf8");
 
       const { workflowId, contractId } = await triggerContractAnalysis({
         contractId: createdContract.id,
@@ -319,6 +364,7 @@ contractsRouter.post(
         priority: body.data.priority ?? "standard",
         traceId: req.traceId!,
         spanId: uuidv4().replace(/-/g, "").slice(0, 16),
+        contractText,
       });
 
       await prisma.contract.update({
@@ -621,6 +667,85 @@ contractsRouter.get(
   })
 );
 
+// ─── DELETE /api/v1/contracts/:id (single, full DB + vector wipeout) ─────────
+
+contractsRouter.delete(
+  "/contracts/:id",
+  authMiddleware,
+  asyncHandler(async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const contract = await prisma.contract.findFirst({
+      where: { id, orgId: req.orgId },
+      select: { id: true, fileName: true },
+    });
+    if (!contract) {
+      return res.status(404).json({
+        error: "NOT_FOUND",
+        message: "Contract not found for this tenant",
+      });
+    }
+
+    const result = await deleteContractCompletely(contract.id);
+
+    return res.status(200).json({
+      deleted: true,
+      contractId: contract.id,
+      fileName: contract.fileName,
+      qdrantWiped: result.qdrantWiped,
+      qdrantError: result.qdrantError,
+      message: result.qdrantWiped
+        ? "Contract and all associated data (clauses, embeddings, HITL items, audit logs) permanently deleted."
+        : "Contract deleted from Postgres, but Qdrant vector cleanup failed — some embeddings may remain. Check qdrantError.",
+    });
+  })
+);
+
+// ─── DELETE /api/v1/contracts (bulk — by ids[], or all=true for full wipe) ───
+
+const BulkDeleteBodySchema = z.object({
+  ids: z.array(z.string().uuid()).optional(),
+  all: z.boolean().optional(),
+});
+
+contractsRouter.delete(
+  "/contracts",
+  authMiddleware,
+  asyncHandler(async (req: Request, res: Response) => {
+    const body = BulkDeleteBodySchema.safeParse(req.body ?? {});
+    if (!body.success) {
+      return res.status(400).json({
+        error: "VALIDATION_ERROR",
+        details: body.error.flatten().fieldErrors,
+      });
+    }
+    if (!body.data.all && (!body.data.ids || body.data.ids.length === 0)) {
+      return res.status(400).json({
+        error: "VALIDATION_ERROR",
+        message: "Provide either { ids: string[] } or { all: true }",
+      });
+    }
+
+    const targets = await prisma.contract.findMany({
+      where: body.data.all
+        ? { orgId: req.orgId }
+        : { orgId: req.orgId, id: { in: body.data.ids } },
+      select: { id: true, fileName: true },
+    });
+
+    const results: Array<{ contractId: string; fileName: string; qdrantWiped: boolean; qdrantError?: string }> = [];
+    for (const target of targets) {
+      const result = await deleteContractCompletely(target.id);
+      results.push({ contractId: target.id, fileName: target.fileName, ...result });
+    }
+
+    return res.status(200).json({
+      deletedCount: results.length,
+      results,
+      message: `${results.length} contract(s) permanently deleted.`,
+    });
+  })
+);
+
 // ─── GET /api/v1/analytics/summary ────────────────────────────────────────────
 
 contractsRouter.get(
@@ -887,7 +1012,10 @@ contractsRouter.delete(
   authMiddleware,
   requireRole("compliance_officer"),
   asyncHandler(async (req: Request, res: Response) => {
-    const { orgId } = req.params;
+    // Route param is always present when this handler matches; asserted so
+    // it's a plain `string` for the Prisma calls below (noUncheckedIndexedAccess
+    // otherwise widens req.params.orgId to `string | undefined`).
+    const orgId = req.params.orgId!;
 
     // Security: only the org itself (or a super-admin) can request erasure
     if (orgId !== req.orgId) {
@@ -897,9 +1025,9 @@ contractsRouter.delete(
       });
     }
 
-    // Not implemented in local dev (no S3 / Qdrant Cloud credentials scoped
-    // for destructive ops here): S3 object deletion and Qdrant delete_by_filter
-    // across the 8 collections. Postgres erasure below IS real.
+    // Not implemented: S3 object deletion and Qdrant delete_by_filter across
+    // the 8 collections (no S3 / Qdrant Cloud credentials scoped for
+    // destructive ops in this deployment). Postgres erasure below is real.
     const deletionRequest = await prisma.deletionRequest.create({
       data: {
         orgId,
@@ -936,7 +1064,7 @@ contractsRouter.delete(
         slaHours: 24,
         message:
           "GDPR erasure: Postgres contract/HITL data erased immediately. " +
-          "S3 object deletion and Qdrant delete_by_filter are not implemented in local dev.",
+          "S3 object deletion and Qdrant delete_by_filter are not implemented in this deployment.",
         deletionRequestId: deletionRequest.id,
         pgRowsDeleted,
       });
@@ -963,14 +1091,18 @@ contractsRouter.get(
     // OTel/distributed-tracing half of this endpoint) is not implemented —
     // would require an HTTP call to the Jaeger Query API for this traceId.
     const auditLog = await prisma.auditLog.findMany({
-      where: { traceId, orgId: req.orgId },
+      // orgId asserted (not left as possibly-undefined): an undefined value
+      // here would make Prisma treat it as "no filter", leaking audit logs
+      // across tenants. authMiddleware always sets req.orgId before this
+      // handler runs — see apps/api/src/middleware/auth.ts.
+      where: { traceId, orgId: req.orgId! },
       orderBy: { timestamp: "asc" },
     });
 
     return res.status(200).json({
       traceId,
       spans: [],
-      spansNote: "Jaeger span retrieval not implemented in local dev — see http://localhost:16686 to inspect this trace directly.",
+      spansNote: "Jaeger span retrieval not implemented — see http://localhost:16686 to inspect this trace directly.",
       auditLog,
     });
   })

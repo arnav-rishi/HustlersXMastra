@@ -19,9 +19,8 @@
  */
 
 import { Agent } from "@mastra/core/agent";
-import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import { gpt4oMini, getAzureOpenAIClient, getChatDeploymentMini } from "./models";
+import { gpt4oMini } from "./models";
 import {
   type ClassificationAgentInput,
   type ClassificationAgentOutput,
@@ -72,62 +71,12 @@ function keywordClassify(text: string): { clauseType: string | null; confidence:
   return { clauseType: best[0], confidence: Math.min(0.85, best[1] + 0.4) };
 }
 
-// ─── Tool: classify_clause_llm ────────────────────────────────────────────────
+// ─── LLM-facing output schema ─────────────────────────────────────────────────
 
-const classifyClauseLlmTool = createTool({
-  id: "classify_clause_llm",
-  description:
-    "Zero-shot LLM fallback to classify a legal clause into one of the 12 standard legal categories.",
-  inputSchema: z.object({
-    clauseText: z.string(),
-    clauseIndex: z.number(),
-  }),
-  outputSchema: z.object({
-    clauseType: z.string(),
-    confidence: z.number().min(0).max(1),
-    reasoning: z.string(),
-  }),
-  execute: async (input, context) => {
-    const { clauseText, clauseIndex } = input;
-    const openai = getAzureOpenAIClient();
-
-    const allowedTypes = CLAUSE_TYPES.join(", ");
-
-    const response = await openai.chat.completions.create({
-      model: getChatDeploymentMini(),
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `You are a legal clause classifier. Classify the given clause into EXACTLY ONE of these categories: ${allowedTypes}. 
-Return JSON: { "clauseType": "<type>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>" }`,
-        },
-        {
-          role: "user",
-          content: `Classify this clause (index ${clauseIndex}):\n\n"${clauseText.slice(0, 800)}"`,
-        },
-      ],
-    });
-
-    const content = response.choices[0]?.message?.content ?? "{}";
-    try {
-      const parsed = JSON.parse(content);
-      const clauseType = CLAUSE_TYPES.includes(parsed.clauseType)
-        ? parsed.clauseType
-        : "indemnification"; // safe default
-      return {
-        clauseType,
-        confidence: Number(parsed.confidence ?? 0.6),
-        reasoning: parsed.reasoning ?? "LLM classification",
-      };
-    } catch {
-      return {
-        clauseType: "indemnification",
-        confidence: 0.5,
-        reasoning: "Parse error — default classification",
-      };
-    }
-  },
+const ClassificationLlmSchema = z.object({
+  clauseType: z.string(),
+  confidence: z.number().min(0).max(1),
+  reasoning: z.string(),
 });
 
 // ─── Agent Definition ─────────────────────────────────────────────────────────
@@ -154,11 +103,48 @@ Clauses that are truly unclassifiable should still be given a best-effort type,
 with confidence < 0.5 to signal uncertainty to the downstream HITL system.`,
 
   model: gpt4oMini,
-
-  tools: {
-    classify_clause_llm: classifyClauseLlmTool,
-  },
 });
+
+// ─── Zero-shot LLM classification (real agent.generateLegacy() call) ─────────
+
+async function classifyClauseLlm(clauseText: string, clauseIndex: number) {
+  const allowedTypes = CLAUSE_TYPES.join(", ");
+
+  try {
+    const response = await classificationAgent.generateLegacy<typeof ClassificationLlmSchema>(
+      [
+        {
+          role: "system",
+          content: `You are a legal clause classifier. Classify the given clause into EXACTLY ONE of these categories: ${allowedTypes}.
+Return JSON: { "clauseType": "<type>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>" }`,
+        },
+        {
+          role: "user",
+          content: `Classify this clause (index ${clauseIndex}):\n\n"${clauseText.slice(0, 800)}"`,
+        },
+      ],
+      { output: ClassificationLlmSchema }
+    );
+
+    // Cast: same TS overload-narrowing artifact as risk-agent.ts — verified
+    // at runtime the response.object is a genuine object matching the schema.
+    const parsed = response.object as z.infer<typeof ClassificationLlmSchema>;
+    const clauseType = CLAUSE_TYPES.includes(parsed.clauseType as any)
+      ? parsed.clauseType
+      : "indemnification"; // safe default
+    return {
+      clauseType,
+      confidence: Number(parsed.confidence ?? 0.6),
+      reasoning: parsed.reasoning ?? "LLM classification",
+    };
+  } catch {
+    return {
+      clauseType: "indemnification",
+      confidence: 0.5,
+      reasoning: "LLM call failed — default classification",
+    };
+  }
+}
 
 // ─── Agent Executor ───────────────────────────────────────────────────────────
 
@@ -196,10 +182,7 @@ export async function executeClassificationAgent(
           fallbackUsed = true;
           fallbackCount++;
 
-          const llmResult = (await classifyClauseLlmTool.execute?.({
-            clauseText: clause.clauseText,
-            clauseIndex: clause.clauseIndex,
-          }, {} as any)) as any || { clauseType: 'indemnification', confidence: 0.5 };
+          const llmResult = await classifyClauseLlm(clause.clauseText, clause.clauseIndex);
 
           clauseType = llmResult.clauseType;
           confidence = llmResult.confidence;

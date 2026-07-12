@@ -180,7 +180,7 @@ model AuditLog {
 
   // Relations
   organization Organization @relation(fields: [orgId], references: [id])
-  contract     Contract?    @relation(fields: [contractId], references: [id])
+  contract     Contract?    @relation(fields: [contractId], references: [id], onDelete: Cascade)
 
   @@index([orgId])
   @@index([traceId])
@@ -213,7 +213,7 @@ model HitlQueueItem {
 
   // Relations
   organization Organization @relation(fields: [orgId], references: [id])
-  contract     Contract     @relation(fields: [contractId], references: [id])
+  contract     Contract     @relation(fields: [contractId], references: [id], onDelete: Cascade)
   reviewer     User?        @relation("Reviewer", fields: [reviewerId], references: [id])
 
   @@index([orgId])
