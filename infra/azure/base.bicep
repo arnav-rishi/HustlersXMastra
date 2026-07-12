@@ -33,6 +33,17 @@ param postgresDatabaseName string = 'lexguard_db'
 @secure()
 param qdrantApiKey string
 
+// Deployment-time disambiguator for the Postgres server name specifically.
+// ARM's deployment-validation engine can keep a stale "resource X exists in
+// location Y" lock for a name even after the resource itself is fully
+// deleted (confirmed gone via `az postgres flexible-server show` AND Resource
+// Graph, yet `az deployment group validate` still rejected the name in a
+// different region) — a real gap hit while deploying this template. Rather
+// than wait out Azure's cache, this makes retries always get a fresh name.
+// utcNow() may only be used in a parameter default, hence it's a param here
+// rather than inlined into the name below.
+param postgresDeployToken string = utcNow('MMddHHmmss')
+
 var uniqueSuffix = uniqueString(resourceGroup().id)
 var acrName = '${namePrefix}acr${uniqueSuffix}'
 var storageAccountName = take('${namePrefix}st${uniqueSuffix}', 24)
@@ -136,7 +147,7 @@ resource qdrantStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' =
 // ─── Postgres Flexible Server (replaces the local Docker postgres) ───────────
 
 resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2023-06-01-preview' = {
-  name: '${namePrefix}-pg-${uniqueSuffix}'
+  name: '${namePrefix}-pg-${uniqueSuffix}-${postgresDeployToken}'
   location: location
   sku: {
     name: 'Standard_B1ms'
@@ -171,15 +182,39 @@ resource postgresFirewallAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewa
   }
 }
 
-// ─── Redis Cache (replaces the local Docker redis) ────────────────────────────
-
-resource redis 'Microsoft.Cache/redis@2023-08-01' = {
-  name: '${namePrefix}-redis-${uniqueSuffix}'
+// ─── Redis (self-hosted container app, internal-only ingress) ────────────────
+// Classic "Azure Cache for Redis" (Microsoft.Cache/redis) is retired for new
+// deployments in this subscription/region ("Azure Cache for Redis is
+// retiring, create Azure Managed Redis instance instead" — hit live during
+// deployment). Its replacement, Azure Managed Redis, uses a different,
+// unverified-here Bicep schema. Self-hosting the same redis:7-alpine image
+// apps/docker-compose.yml already uses locally avoids that risk entirely and
+// reuses the exact pattern already proven to work for Qdrant below. No auth
+// configured — this container has internal-only ingress, unreachable outside
+// the Container Apps Environment's private network (same trust boundary as
+// Postgres's Azure-services-only firewall rule above).
+resource redis 'Microsoft.App/containerApps@2024-03-01' = {
+  name: '${namePrefix}-redis'
   location: location
   properties: {
-    sku: { name: 'Basic', family: 'C', capacity: 0 }
-    enableNonSslPort: false
-    minimumTlsVersion: '1.2'
+    managedEnvironmentId: containerAppsEnv.id
+    configuration: {
+      ingress: {
+        external: false
+        targetPort: 6379
+        transport: 'tcp'
+      }
+    }
+    template: {
+      containers: [
+        {
+          name: 'redis'
+          image: 'redis:7-alpine'
+          resources: { cpu: json('0.5'), memory: '1Gi' }
+        }
+      ]
+      scale: { minReplicas: 1, maxReplicas: 1 }
+    }
   }
 }
 
@@ -222,6 +257,59 @@ resource qdrant 'Microsoft.App/containerApps@2024-03-01' = {
   }
 }
 
+// ─── Jaeger (public image, UI exposed externally) ─────────────────────────────
+// Uses a public image directly (no custom build needed, like Qdrant/Redis).
+// The UI (16686) is external so it's human-reachable as a dashboard link;
+// the OTLP gRPC receiver (4317, used internally by the OTel Collector to
+// ship traces) is mapped via additionalPortMappings as internal-only.
+//
+// SECURITY NOTE: Jaeger's OSS all-in-one image has no built-in
+// authentication. Exposing its UI externally means anyone with the URL can
+// view every trace — which may include span attributes touching contract
+// content depending on instrumentation detail. Acceptable for this tool's
+// current scope, but put a reverse proxy with auth (or Azure Front Door +
+// auth) in front before treating this as safe for real customer data.
+//
+// This resource has NOT been validated against a live subscription — the
+// additionalPortMappings + mixed external/internal port behavior on one
+// Container App is the least-certain part of this whole Bicep set. Run
+// `az deployment group what-if` and check the OTel Collector's logs after
+// deploy to confirm trace export is actually reaching Jaeger; adjust here if not.
+resource jaeger 'Microsoft.App/containerApps@2024-03-01' = {
+  name: '${namePrefix}-jaeger'
+  location: location
+  properties: {
+    managedEnvironmentId: containerAppsEnv.id
+    configuration: {
+      ingress: {
+        external: true
+        targetPort: 16686
+        transport: 'http'
+        additionalPortMappings: [
+          {
+            targetPort: 4317
+            exposedPort: 4317
+            external: false
+          }
+        ]
+      }
+    }
+    template: {
+      containers: [
+        {
+          name: 'jaeger'
+          image: 'jaegertracing/all-in-one:1.57'
+          resources: { cpu: json('0.5'), memory: '1Gi' }
+          env: [
+            { name: 'COLLECTOR_OTLP_ENABLED', value: 'true' }
+          ]
+        }
+      ]
+      scale: { minReplicas: 1, maxReplicas: 1 }
+    }
+  }
+}
+
 // ─── Outputs consumed by apps.bicep / deploy scripts ──────────────────────────
 
 output acrLoginServer string = acr.properties.loginServer
@@ -231,6 +319,8 @@ output containerAppsEnvId string = containerAppsEnv.id
 output containerAppsEnvDefaultDomain string = containerAppsEnv.properties.defaultDomain
 output postgresHost string = postgres.properties.fullyQualifiedDomainName
 output postgresDatabaseUrl string = 'postgresql://${postgresAdminUsername}:${postgresAdminPassword}@${postgres.properties.fullyQualifiedDomainName}:5432/${postgresDatabaseName}?sslmode=require'
-output redisHost string = redis.properties.hostName
-output redisUrl string = 'rediss://:${redis.listKeys().primaryKey}@${redis.properties.hostName}:${redis.properties.sslPort}'
+output redisHost string = redis.properties.configuration.ingress.fqdn
+output redisUrl string = 'redis://${redis.properties.configuration.ingress.fqdn}:6379'
 output qdrantInternalUrl string = 'http://${qdrant.properties.configuration.ingress.fqdn}'
+output jaegerExternalFqdn string = jaeger.properties.configuration.ingress.fqdn
+output jaegerInternalOtlpEndpoint string = '${jaeger.properties.configuration.ingress.fqdn}:4317'

@@ -26,10 +26,38 @@ needed.
 |---|---|---|
 | [apps/api/Dockerfile](apps/api/Dockerfile) | Production api image | Built + ran locally, `/health` returned 200 |
 | [apps/web/Dockerfile](apps/web/Dockerfile) | Production web image (Next standalone) | Built + ran locally, proxy round-tripped to a real api container |
+| [infra/otel/Dockerfile](infra/otel/Dockerfile) | OTel Collector image w/ baked config | Built + ran locally, config loaded with no errors |
+| [infra/prometheus/Dockerfile](infra/prometheus/Dockerfile) | Prometheus image w/ build-time scrape target | Built + ran locally, confirmed substituted target via Prometheus's own config API |
+| [infra/grafana/Dockerfile](infra/grafana/Dockerfile) | Grafana image w/ build-time datasource | Built + ran locally, confirmed substituted datasource URL via Grafana's API |
 | [.dockerignore](.dockerignore) | Keeps build context small | — |
-| [infra/azure/base.bicep](infra/azure/base.bicep) | Container Apps Env, ACR, Postgres, Redis, Qdrant | **Not deployed against a live subscription** — no `az`/`azd` available in the environment this was written in |
-| [infra/azure/apps.bicep](infra/azure/apps.bicep) | api + web container apps | Same caveat |
-| [infra/azure/deploy.sh](infra/azure/deploy.sh) | Orchestrates the two-phase deploy | Same caveat |
+| [infra/azure/base.bicep](infra/azure/base.bicep) | Container Apps Env, ACR, Postgres, Redis, Qdrant, Jaeger | Deployed successfully to a live subscription during this session (`centralus`, after working through several Azure-side surprises — see below) |
+| [infra/azure/apps.bicep](infra/azure/apps.bicep) | api, web, otel-collector, prometheus, grafana container apps | The api/web portion deployed successfully live. The otel-collector/prometheus/grafana additions have **not** been deployed live yet — written and locally image-verified only. Run `az deployment group what-if` before applying. |
+| [infra/azure/deploy.sh](infra/azure/deploy.sh) | Orchestrates the phased deploy | Same as above |
+
+### Real issues hit deploying this live (not hypothetical — actually happened)
+
+- **Region matters more than expected.** `eastus` rejected both Postgres
+  Flexible Server (`LocationIsOfferRestricted` — subscription-level, not a
+  capacity issue) and, separately, Container Apps Environments
+  (`AKSCapacityHeavyUsage`, transient regional capacity). Check
+  `az postgres flexible-server list-skus --location <region>` before
+  committing to a region — an empty result means that subscription can't
+  provision Postgres there at all, regardless of what other resources
+  (like Azure OpenAI) already work in that region.
+- **Classic "Azure Cache for Redis" (`Microsoft.Cache/redis`) is retired for
+  new deployments.** `base.bicep` now runs `redis:7-alpine` as a self-hosted
+  container app instead (internal-only ingress) rather than the managed
+  service — same image the local `docker-compose.yml` already uses.
+- **`@qdrant/js-client-rest` ignores the URL's implicit port** and always
+  tries 6333 unless told otherwise — breaks against any HTTPS endpoint that
+  only exposes 443 (e.g. Container Apps external ingress). Fixed in
+  `packages/qdrant/src/client.ts` by deriving the port explicitly from the
+  URL instead of trusting the library default.
+- **ARM's deployment-validation engine can hold a stale "resource X exists in
+  location Y" lock** even after the resource is fully deleted (confirmed via
+  both `az <service> show` and Resource Graph). `base.bicep`'s Postgres
+  server name includes a `utcNow()`-derived token specifically so retries
+  can't collide with this.
 
 Before running the Bicep for real: `az bicep build --file infra/azure/base.bicep`
 and `az deployment group what-if` on both files. Treat the Bicep as a strong
@@ -76,16 +104,25 @@ export AZURE_OPENAI_ENDPOINT='https://<resource>.openai.azure.com'
 export AZURE_OPENAI_DEPLOYMENT='<your chat deployment name>'
 export AZURE_OPENAI_EMBEDDING_DEPLOYMENT='<your embedding deployment name>'
 export JWT_PUBLIC_KEY_PATH="$(pwd)/apps/api/keys/public.pem"
+export GRAFANA_ADMIN_PASSWORD='<strong password — Grafana is externally reachable>'
 
 bash infra/azure/deploy.sh
 ```
 
 This runs, in order: resource group → `base.bicep` (Container Apps
-Environment, ACR, managed Postgres, managed Redis, self-hosted Qdrant with
-Azure Files persistence) → `az acr build` for both images (builds happen in
-Azure, not on your machine — no local `docker push` credentials needed) →
-`apps.bicep` (api + web container apps). It's idempotent; re-running only
-updates what changed.
+Environment, ACR, managed Postgres, self-hosted Redis, self-hosted Qdrant
+with Azure Files persistence, Jaeger) → `az acr build` for all five images
+(api, web, otel-collector, prometheus, grafana — builds happen in Azure, not
+on your machine, no local `docker push` credentials needed) → `apps.bicep`
+(api, web, otel-collector, prometheus, grafana container apps). It's
+idempotent; re-running only updates what changed.
+
+**Before committing to a region**, confirm Postgres Flexible Server is
+actually offered to your subscription there — an empty result means it
+isn't, regardless of what else works in that region:
+```bash
+az postgres flexible-server list-skus --location "$LOCATION" -o table
+```
 
 After it finishes, initialize the database and Qdrant collections against
 the new environment:
@@ -112,19 +149,34 @@ az containerapp hostname bind --name lexguard-web --resource-group $RESOURCE_GRO
 Azure Container Apps provisions and renews the TLS certificate automatically
 for managed certificates. `api` never needs a public hostname at all.
 
-## Cost shape (rough, eastus, as of writing)
+## Cost shape (rough, as of writing)
 
 - Container Apps: pay-per-use CPU/memory + a small always-on baseline for
-  `minReplicas: 1` on api/web/qdrant — expect low tens of $/month at hackathon
+  `minReplicas: 1` on each of api/web/qdrant/redis/jaeger/otel-collector/
+  prometheus/grafana (8 apps total) — expect tens of $/month at hackathon
   scale, more once you raise `maxReplicas` or usage grows.
 - Postgres Flexible Server (Burstable B1ms): ~$12-15/month.
-- Redis (Basic C0): ~$16/month.
 - ACR (Basic): ~$5/month.
 - Storage Account (Qdrant persistence): a few $/month at small volumes.
+
+Redis is now self-hosted (container app, no separate managed-service line
+item) since classic Azure Cache for Redis is retired for new deployments —
+see the issues list above.
 
 This is meaningfully more than a $10-20/month VPS running the same
 `docker-compose.yml` you already have locally — the tradeoff is zero server
 maintenance and one already-familiar vendor instead of a new one.
+
+## Security note: Jaeger has no authentication
+
+Jaeger's OSS all-in-one image ships with no built-in auth, and its UI is
+exposed externally (it needs to be, to be usable as a dashboard link).
+Anyone with the URL can view every trace, which may include span attributes
+touching contract content depending on instrumentation detail. Grafana at
+least has a real admin password (`GRAFANA_ADMIN_PASSWORD`, required, no
+default). Put a reverse proxy with auth in front of Jaeger (or Azure Front
+Door + auth) before treating this as safe for real customer data — not done
+here, flagged rather than silently shipped.
 
 ## What's intentionally not covered here
 

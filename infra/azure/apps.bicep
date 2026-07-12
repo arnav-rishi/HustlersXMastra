@@ -65,8 +65,27 @@ param enkryptEnabled string = 'false'
 param lexisNexisEnabled string = 'false'
 param hitlEnabled string = 'true'
 
+@description('Image tag for the otel-collector image (infra/otel/Dockerfile).')
+param otelCollectorImageTag string
+
+@description('Image tag for the prometheus image (infra/prometheus/Dockerfile).')
+param prometheusImageTag string
+
+@description('Image tag for the grafana image (infra/grafana/Dockerfile).')
+param grafanaImageTag string
+
+@description('Jaeger OTLP gRPC endpoint from base.bicep output (jaegerInternalOtlpEndpoint) — where the collector ships traces.')
+param jaegerOtlpEndpoint string
+
+@description('Grafana admin password — required (no default): Grafana is externally reachable, so this must not silently fall back to a weak default.')
+@secure()
+param grafanaAdminPassword string
+
 var apiName = '${namePrefix}-api'
 var webName = '${namePrefix}-web'
+var otelCollectorName = '${namePrefix}-otel-collector'
+var prometheusName = '${namePrefix}-prometheus'
+var grafanaName = '${namePrefix}-grafana'
 
 resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: apiName
@@ -123,6 +142,12 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'ENKRYPT_ENABLED', value: enkryptEnabled }
             { name: 'LEXISNEXIS_ENABLED', value: lexisNexisEnabled }
             { name: 'HITL_ENABLED', value: hitlEnabled }
+            // Was previously unset here, silently defaulting to
+            // http://localhost:4318 inside the container (i.e. nowhere) —
+            // tracing/metrics export was a no-op until this pointed at a
+            // real collector.
+            { name: 'OTEL_EXPORTER_OTLP_ENDPOINT', value: 'http://${otelCollectorApp.properties.configuration.ingress.fqdn}' }
+            { name: 'OTEL_SERVICE_NAME', value: 'lexguard-api' }
           ]
           probes: [
             {
@@ -186,5 +211,129 @@ resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
   }
 }
 
+// ─── OTel Collector (internal-only — api ships traces/metrics here) ──────────
+
+resource otelCollectorApp 'Microsoft.App/containerApps@2024-03-01' = {
+  name: otelCollectorName
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: { '${acrPullIdentityId}': {} }
+  }
+  properties: {
+    managedEnvironmentId: containerAppsEnvId
+    configuration: {
+      ingress: {
+        external: false
+        targetPort: 4318
+        transport: 'http'
+        // Prometheus needs to reach the collector's own metrics-exporter
+        // port (8888, see infra/otel/collector-config.yml's `prometheus`
+        // exporter) separately from the OTLP receiver port (4318) that api
+        // posts traces/metrics to.
+        additionalPortMappings: [
+          { targetPort: 8888, exposedPort: 8888, external: false }
+        ]
+      }
+      registries: [
+        { server: acrLoginServer, identity: acrPullIdentityId }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: 'otel-collector'
+          image: '${acrLoginServer}/lexguard-otel-collector:${otelCollectorImageTag}'
+          resources: { cpu: json('0.5'), memory: '1Gi' }
+          env: [
+            { name: 'JAEGER_ENDPOINT', value: jaegerOtlpEndpoint }
+          ]
+        }
+      ]
+      scale: { minReplicas: 1, maxReplicas: 1 }
+    }
+  }
+}
+
+// ─── Prometheus (internal-only — scraped by Grafana) ──────────────────────────
+
+resource prometheusApp 'Microsoft.App/containerApps@2024-03-01' = {
+  name: prometheusName
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: { '${acrPullIdentityId}': {} }
+  }
+  properties: {
+    managedEnvironmentId: containerAppsEnvId
+    configuration: {
+      ingress: {
+        external: false
+        targetPort: 9090
+        transport: 'http'
+      }
+      registries: [
+        { server: acrLoginServer, identity: acrPullIdentityId }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: 'prometheus'
+          // Scrape target (otel-collector:8888) is baked in at build time —
+          // see infra/prometheus/Dockerfile's OTEL_COLLECTOR_TARGET build-arg.
+          image: '${acrLoginServer}/lexguard-prometheus:${prometheusImageTag}'
+          resources: { cpu: json('0.5'), memory: '1Gi' }
+        }
+      ]
+      scale: { minReplicas: 1, maxReplicas: 1 }
+    }
+  }
+}
+
+// ─── Grafana (external — human-facing dashboard) ──────────────────────────────
+
+resource grafanaApp 'Microsoft.App/containerApps@2024-03-01' = {
+  name: grafanaName
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: { '${acrPullIdentityId}': {} }
+  }
+  properties: {
+    managedEnvironmentId: containerAppsEnvId
+    configuration: {
+      ingress: {
+        external: true
+        targetPort: 3000
+        transport: 'http'
+      }
+      registries: [
+        { server: acrLoginServer, identity: acrPullIdentityId }
+      ]
+      secrets: [
+        { name: 'grafana-admin-password', value: grafanaAdminPassword }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: 'grafana'
+          // Datasource URL (prometheus:9090) is baked in at build time — see
+          // infra/grafana/Dockerfile's PROMETHEUS_TARGET build-arg.
+          image: '${acrLoginServer}/lexguard-grafana:${grafanaImageTag}'
+          resources: { cpu: json('0.5'), memory: '1Gi' }
+          env: [
+            { name: 'GF_SECURITY_ADMIN_PASSWORD', secretRef: 'grafana-admin-password' }
+            { name: 'GF_SECURITY_ADMIN_USER', value: 'admin' }
+          ]
+        }
+      ]
+      scale: { minReplicas: 1, maxReplicas: 1 }
+    }
+  }
+}
+
 output webFqdn string = webApp.properties.configuration.ingress.fqdn
 output apiInternalFqdn string = apiApp.properties.configuration.ingress.fqdn
+output grafanaFqdn string = grafanaApp.properties.configuration.ingress.fqdn

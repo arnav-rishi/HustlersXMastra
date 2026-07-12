@@ -71,6 +71,10 @@ services:
       - "4317:4317"   # gRPC receiver
       - "4318:4318"   # HTTP receiver
       - "8888:8888"   # Prometheus metrics
+    environment:
+      # Overridden in Azure to the Jaeger container app's internal FQDN
+      # (infra/azure/base.bicep) — see ${env:JAEGER_ENDPOINT} in collector-config.yml.
+      JAEGER_ENDPOINT: jaeger:4317
     volumes:
       - ./infra/otel/collector-config.yml:/etc/otel/config.yaml
     command: ["--config=/etc/otel/config.yaml"]
