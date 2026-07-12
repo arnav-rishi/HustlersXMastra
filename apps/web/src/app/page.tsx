@@ -69,16 +69,15 @@ export default function DashboardPage() {
     setUploading(true);
     setUploadMessage(null);
     try {
-      const contractText = await file.text();
-      const response = await fetch(`${API_BASE_URL}/api/v1/contracts/analyze`, {
+      const formData = new FormData();
+      formData.append("contract", file);
+      formData.append("jurisdiction", "Unknown");
+      formData.append("priority", "standard");
+
+      const response = await fetch(`${API_BASE_URL}/api/v1/contracts/upload`, {
         method: "POST",
-        headers: getApiHeaders(true),
-        body: JSON.stringify({
-          fileName: file.name,
-          contractText,
-          jurisdiction: "Unknown",
-          priority: "standard",
-        }),
+        headers: getApiHeaders(false),
+        body: formData,
       });
 
       if (!response.ok) {
