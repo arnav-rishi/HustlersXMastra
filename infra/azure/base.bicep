@@ -227,7 +227,14 @@ resource qdrant 'Microsoft.App/containerApps@2024-03-01' = {
       containers: [
         {
           name: 'qdrant'
-          image: 'qdrant/qdrant:v1.10.0'
+          // Was v1.10.0, mismatched against @qdrant/js-client-rest 1.18.0
+          // (package.json pins ^1.10.0 but the lockfile resolved a newer
+          // compatible version). Confirmed live: this broke hybridSearch
+          // specifically ("Can not recognize \"search\" as point id" — the
+          // client's newer search request shape wasn't routed correctly by
+          // the old server) while upsert still worked (older, stable API
+          // shape). Bumped server to match the actual installed client.
+          image: 'qdrant/qdrant:v1.18.0'
           resources: { cpu: json('1.0'), memory: '2Gi' }
           env: [
             { name: 'QDRANT__SERVICE__API_KEY', secretRef: 'qdrant-api-key' }
