@@ -53,24 +53,42 @@ Cross-jurisdictional: always note which jurisdiction applies.`,
 // for an agent to decide here. Kept as plain functions; only the actual
 // content-generation step below goes through the real agent.
 
-async function retrieveClauseContext(input: { contractId: string; orgId: string; sessionId: string; question: string; jurisdiction?: string }) {
-  const qdrant = getQdrantClient();
-  const vector = await embedText(input.question);
-  const [clauseResults, historyResults] = await Promise.all([
-    qdrant.denseSearch(QDRANT_COLLECTIONS.CONTRACTS, vector,
-      { must: [{ key: "contract_id", match: { value: input.contractId } }, { key: "org_id", match: { value: input.orgId } }] },
-      RETRIEVAL_TOP_K, RETRIEVAL_MIN_SCORE),
-    qdrant.denseSearch(QDRANT_COLLECTIONS.CONVERSATION_MEMORY, vector,
-      { must: [{ key: "session_id", match: { value: input.sessionId } }] },
-      5, 0.5),
-  ]);
+async function retrieveClauseContext(input: { contractId: string; orgId: string; sessionId: string; question: string; jurisdiction?: string; fallbackClauseText?: string }) {
+  // Qdrant retrieval is best-effort, not load-bearing: if it's unreachable or
+  // errors (confirmed live: version-mismatch/ingress issues can make this
+  // fail independently of the rest of the app), fall back to the caller-
+  // supplied clause text (sourced from Postgres, which has been reliable
+  // throughout) instead of failing the whole Q&A request.
+  try {
+    const qdrant = getQdrantClient();
+    const vector = await embedText(input.question);
+    const [clauseResults, historyResults] = await Promise.all([
+      qdrant.denseSearch(QDRANT_COLLECTIONS.CONTRACTS, vector,
+        { must: [{ key: "contract_id", match: { value: input.contractId } }, { key: "org_id", match: { value: input.orgId } }] },
+        RETRIEVAL_TOP_K, RETRIEVAL_MIN_SCORE),
+      qdrant.denseSearch(QDRANT_COLLECTIONS.CONVERSATION_MEMORY, vector,
+        { must: [{ key: "session_id", match: { value: input.sessionId } }] },
+        5, 0.5),
+    ]);
+
+    if (clauseResults.length > 0) {
+      const contextText = [
+        "RELEVANT CONTRACT CLAUSES:",
+        ...clauseResults.map((r) => `Clause (score:${r.score.toFixed(2)}): ${(r.payload as any).clause_text ?? ""}`),
+        "\nCONVERSATION HISTORY:",
+        ...historyResults.map((r) => `[${(r.payload as any).message_role}]: ${(r.payload as any).message_text ?? ""}`),
+      ].join("\n");
+      return { clauses: clauseResults, conversationHistory: historyResults, contextText };
+    }
+  } catch (err) {
+    console.warn("[LexGuard][QAAgent] Qdrant retrieval failed, falling back to Postgres clause text:", err);
+  }
+
   const contextText = [
     "RELEVANT CONTRACT CLAUSES:",
-    ...clauseResults.map((r) => `Clause (score:${r.score.toFixed(2)}): ${(r.payload as any).clause_text ?? ""}`),
-    "\nCONVERSATION HISTORY:",
-    ...historyResults.map((r) => `[${(r.payload as any).message_role}]: ${(r.payload as any).message_text ?? ""}`),
+    input.fallbackClauseText || "(no clause text available)",
   ].join("\n");
-  return { clauses: clauseResults, conversationHistory: historyResults, contextText };
+  return { clauses: [], conversationHistory: [], contextText };
 }
 
 // ─── Answer Generation (real agent.generateLegacy() call) ────────────────────
@@ -126,21 +144,29 @@ The "answer" must be in your own plain words per the rules above. Citations are 
 }
 
 async function storeConversationTurn(input: { sessionId: string; orgId: string; userId: string; turnIndex: number; role: "user" | "assistant"; text: string; contractId: string }) {
-  const qdrant = getQdrantClient();
-  const vector = await embedText(input.text);
-  await qdrant.upsertPoints(QDRANT_COLLECTIONS.CONVERSATION_MEMORY, [{
-    id: uuidv4(), vector,
-    payload: {
-      session_id: input.sessionId, org_id: input.orgId, user_id: input.userId,
-      turn_index: input.turnIndex, message_role: input.role, message_text: input.text,
-      linked_contract_id: input.contractId, timestamp: new Date().toISOString(),
-      ttl_days: TTL.CONVERSATION_MEMORY_DAYS,
-    },
-  }]);
-  return { stored: true };
+  // Best-effort, like the retrieval side above — conversation memory is a
+  // nice-to-have for follow-up questions, not something a Qdrant hiccup
+  // should be able to break the actual Q&A response over.
+  try {
+    const qdrant = getQdrantClient();
+    const vector = await embedText(input.text);
+    await qdrant.upsertPoints(QDRANT_COLLECTIONS.CONVERSATION_MEMORY, [{
+      id: uuidv4(), vector,
+      payload: {
+        session_id: input.sessionId, org_id: input.orgId, user_id: input.userId,
+        turn_index: input.turnIndex, message_role: input.role, message_text: input.text,
+        linked_contract_id: input.contractId, timestamp: new Date().toISOString(),
+        ttl_days: TTL.CONVERSATION_MEMORY_DAYS,
+      },
+    }]);
+    return { stored: true };
+  } catch (err) {
+    console.warn("[LexGuard][QAAgent] Failed to store conversation turn in Qdrant:", err);
+    return { stored: false };
+  }
 }
 
-export async function executeQAAgent(request: QARequest & { userId: string; jurisdiction?: string; turnIndex?: number }): Promise<QAResponse> {
+export async function executeQAAgent(request: QARequest & { userId: string; jurisdiction?: string; turnIndex?: number; fallbackClauseText?: string }): Promise<QAResponse> {
   return withSpan(OTEL_SPAN_NAMES.LLM_GPT4O_COMPLETION, {
     "lexguard.org_id": request.orgId, "lexguard.contract_id": request.contractId,
     "lexguard.agent_id": "qa-agent",
@@ -148,8 +174,9 @@ export async function executeQAAgent(request: QARequest & { userId: string; juri
     const sessionId = request.sessionId ?? uuidv4();
     const turnIndex = request.turnIndex ?? 0;
 
-    // 1. Retrieve context
-    const ctx = await retrieveClauseContext({ contractId: request.contractId, orgId: request.orgId, sessionId, question: request.question, jurisdiction: request.jurisdiction });
+    // 1. Retrieve context (falls back to Postgres-sourced clause text if
+    // Qdrant is unreachable/empty — see retrieveClauseContext)
+    const ctx = await retrieveClauseContext({ contractId: request.contractId, orgId: request.orgId, sessionId, question: request.question, jurisdiction: request.jurisdiction, fallbackClauseText: request.fallbackClauseText });
 
     // 2. Store user turn
     await storeConversationTurn({ sessionId, orgId: request.orgId, userId: request.userId, turnIndex, role: "user" as const, text: request.question, contractId: request.contractId });

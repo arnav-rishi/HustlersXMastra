@@ -539,9 +539,22 @@ contractsRouter.post(
     }
 
     try {
+      // Postgres-sourced clause text, passed as a fallback for when Qdrant
+      // retrieval comes up empty/unreachable (see qa-agent.ts) — Postgres
+      // has been the reliable store throughout, unlike Qdrant.
+      const clauses = await prisma.clause.findMany({
+        where: { contractId: bodyResult.data.contractId },
+        orderBy: { clauseIndex: "asc" },
+        select: { clauseType: true, clauseText: true },
+      });
+      const fallbackClauseText = clauses
+        .map((c) => `[${c.clauseType ?? "clause"}] ${c.clauseText}`)
+        .join("\n\n");
+
       const qaResponse = await executeQAAgent({
         ...bodyResult.data,
         userId: req.user!.sub,
+        fallbackClauseText,
       });
 
       return res.status(200).json(qaResponse);
