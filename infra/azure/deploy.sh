@@ -2,7 +2,10 @@
 # LexGuard AI — Azure Container Apps deployment
 #
 # Orchestrates the two-phase deploy described in DEPLOYMENT.md:
-#   1. base.bicep  — Container Apps Environment, ACR, Postgres, Redis, Qdrant, Jaeger
+#   1. base.bicep  — Container Apps Environment, ACR, Postgres, Qdrant, Jaeger
+#      (Redis runs as a sidecar inside the api Container App, see apps.bicep —
+#      TCP-transport internal ingress between separate container apps was
+#      confirmed live to be unreliable on this environment)
 #   2. az acr build — builds api/web/otel-collector/prometheus/grafana images
 #      server-side (no local docker push)
 #   3. apps.bicep  — api, web (external), otel-collector, prometheus, grafana
@@ -72,7 +75,7 @@ else
   az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --output none
 fi
 
-echo "== Phase 1: base infrastructure (Container Apps Env, ACR, Postgres, Redis, Qdrant, Jaeger) =="
+echo "== Phase 1: base infrastructure (Container Apps Env, ACR, Postgres, Qdrant, Jaeger) =="
 BASE_OUT=$(az deployment group create \
   --resource-group "$RESOURCE_GROUP" \
   --template-file "$SCRIPT_DIR/base.bicep" \
@@ -88,7 +91,6 @@ ACR_PULL_IDENTITY_ID=$(echo "$BASE_OUT" | jq -r '.acrPullIdentityId.value')
 CONTAINER_APPS_ENV_ID=$(echo "$BASE_OUT" | jq -r '.containerAppsEnvId.value')
 CONTAINER_APPS_ENV_DEFAULT_DOMAIN=$(echo "$BASE_OUT" | jq -r '.containerAppsEnvDefaultDomain.value')
 DATABASE_URL=$(echo "$BASE_OUT" | jq -r '.postgresDatabaseUrl.value')
-REDIS_URL=$(echo "$BASE_OUT" | jq -r '.redisUrl.value')
 QDRANT_INTERNAL_URL=$(echo "$BASE_OUT" | jq -r '.qdrantInternalUrl.value')
 JAEGER_EXTERNAL_FQDN=$(echo "$BASE_OUT" | jq -r '.jaegerExternalFqdn.value')
 JAEGER_OTLP_ENDPOINT=$(echo "$BASE_OUT" | jq -r '.jaegerInternalOtlpEndpoint.value')
@@ -169,7 +171,6 @@ APPS_OUT=$(az deployment group create \
                jaegerOtlpEndpoint="$JAEGER_OTLP_ENDPOINT" \
                grafanaAdminPassword="$GRAFANA_ADMIN_PASSWORD" \
                databaseUrl="$DATABASE_URL" \
-               redisUrl="$REDIS_URL" \
                qdrantInternalUrl="$QDRANT_INTERNAL_URL" \
                qdrantApiKey="$QDRANT_API_KEY" \
                azureOpenAiApiKey="$AZURE_OPENAI_API_KEY" \
