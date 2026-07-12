@@ -38,11 +38,17 @@ param qdrantApiKey string
 // location Y" lock for a name even after the resource itself is fully
 // deleted (confirmed gone via `az postgres flexible-server show` AND Resource
 // Graph, yet `az deployment group validate` still rejected the name in a
-// different region) — a real gap hit while deploying this template. Rather
-// than wait out Azure's cache, this makes retries always get a fresh name.
-// utcNow() may only be used in a parameter default, hence it's a param here
-// rather than inlined into the name below.
-param postgresDeployToken string = utcNow('MMddHHmmss')
+// different region) — a real gap hit while deploying this template.
+//
+// IMPORTANT: this must stay a FIXED default, not utcNow() — a dynamic value
+// here means every redeploy creates a brand-new Postgres server instead of
+// updating the existing one (hit live: two servers existed simultaneously,
+// api silently pointed at whichever one the latest deploy created, the other
+// sat there orphaned and billing). Pinned to the suffix of the server that's
+// actually live as of this fix. Only change this again (to escape a fresh
+// stale-cache collision) if you're deliberately doing a one-time server
+// replacement — never leave it dynamic.
+param postgresDeployToken string = '0712041517'
 
 var uniqueSuffix = uniqueString(resourceGroup().id)
 var acrName = '${namePrefix}acr${uniqueSuffix}'
