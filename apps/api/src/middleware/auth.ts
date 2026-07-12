@@ -55,6 +55,10 @@ function getPublicKey(): string {
   if (_publicKey) return _publicKey;
 
   const env = getEnv();
+  if (env.JWT_RS256_PUBLIC_KEY_PEM) {
+    _publicKey = env.JWT_RS256_PUBLIC_KEY_PEM;
+    return _publicKey;
+  }
   try {
     _publicKey = fs.readFileSync(env.JWT_RS256_PUBLIC_KEY_PATH, "utf-8");
     return _publicKey;

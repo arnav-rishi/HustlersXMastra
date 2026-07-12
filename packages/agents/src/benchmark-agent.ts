@@ -18,11 +18,10 @@
  */
 
 import { Agent } from "@mastra/core/agent";
-import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import crypto from "crypto";
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
-import { gpt4o, getAzureOpenAIClient, getChatDeployment } from "./models";
+import { gpt4o, getChatDeployment } from "./models";
 import { recordLlmTokens } from "@lexguard/observability/metrics";
 import type { RetrievedItem } from "@lexguard/shared/schemas";
 
@@ -112,93 +111,17 @@ Return JSON:
 }`;
 }
 
-// ─── Tool ─────────────────────────────────────────────────────────────────────
+// ─── LLM-facing output schema ─────────────────────────────────────────────────
 
-const benchmarkClauseTool = createTool({
-  id: "benchmark_clause",
-  description: "Benchmarks a clause against industry templates using GPT-4o with CRISPE prompting.",
-  inputSchema: z.object({
-    clauseType: z.string(),
-    clauseIndex: z.number(),
-    clauseText: z.string(),
-    jurisdiction: z.string(),
-    orgId: z.string(),
-    retrievedTemplatesContext: z.string(),
-    industrySector: z.string().default("Commercial"),
-  }),
-  outputSchema: z.object({
-    percentileRank: z.number(),
-    marketPosition: z.enum(["Above Market", "Market Standard", "Below Market"]),
-    topComparables: z.array(z.object({
-      source: z.string(),
-      similarityScore: z.number(),
-      keyDifferences: z.string(),
-    })),
-    deltasSummary: z.string(),
-    promptHash: z.string(),
-    inputTokens: z.number(),
-    outputTokens: z.number(),
-    latencyMs: z.number(),
-  }),
-  execute: async (input, context) => {
-    const openai = getAzureOpenAIClient();
-
-    const systemPrompt = buildBenchmarkPrompt({
-      clauseType: input.clauseType,
-      orgName: `Org-${input.orgId.slice(0, 8)}`,
-      retrievedTemplates: input.retrievedTemplatesContext || "No comparable templates retrieved.",
-      industrySector: input.industrySector,
-      jurisdiction: input.jurisdiction,
-      clauseText: input.clauseText,
-    });
-
-    const promptHash = crypto.createHash("sha256").update(systemPrompt).digest("hex");
-    const start = Date.now();
-    let result: any = null;
-    let inputTokens = 0, outputTokens = 0;
-
-    try {
-      const response = await openai.chat.completions.create({
-        model: getChatDeployment(),
-        response_format: { type: "json_object" },
-        messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: `Benchmark clause index ${input.clauseIndex}.` },
-          ],
-        });
-        inputTokens = response.usage?.prompt_tokens ?? 0;
-        outputTokens = response.usage?.completion_tokens ?? 0;
-        result = JSON.parse(response.choices[0]?.message?.content ?? "{}");
-        recordLlmTokens(input.orgId, getChatDeployment(), inputTokens, outputTokens);
-    } catch {
-      // Graceful degradation: return global average
-      result = {
-        percentileRank: 50,
-        marketPosition: "Market Standard",
-        topComparables: [],
-        deltasSummary: "Benchmark analysis unavailable — insufficient template data or service error.",
-      };
-    }
-
-    const topComparables = Array.isArray(result.topComparables)
-      ? result.topComparables.map((item: any) => ({
-          source: item.source ?? "Unknown",
-          similarityScore: item.similarityScore ?? 0,
-          keyDifferences: item.keyDifferences ?? "",
-        }))
-      : [];
-
-    return {
-      percentileRank: result.percentileRank ?? 50,
-      marketPosition: result.marketPosition ?? "Market Standard",
-      topComparables,
-      deltasSummary: result.deltasSummary ?? "",
-      promptHash,
-      inputTokens,
-      outputTokens,
-      latencyMs: Date.now() - start,
-    };
-  },
+const BenchmarkLlmSchema = z.object({
+  percentileRank: z.number(),
+  marketPosition: z.enum(["Above Market", "Market Standard", "Below Market"]),
+  topComparables: z.array(z.object({
+    source: z.string(),
+    similarityScore: z.number(),
+    keyDifferences: z.string(),
+  })),
+  deltasSummary: z.string(),
 });
 
 // ─── Agent ────────────────────────────────────────────────────────────────────
@@ -207,11 +130,79 @@ export const benchmarkAgent: Agent = new Agent({
   id: "benchmark-agent",
   name: "benchmark-agent",
   instructions: `You are the Benchmark Agent in LexGuard AI. Compare legal clauses against industry templates.
-Use benchmark_clause to produce: percentile rank, market position (Above/Standard/Below Market), top 3 comparable templates, delta summary.
+Produce: percentile rank, market position (Above/Standard/Below Market), top 3 comparable templates, delta summary.
 If no templates retrieved, return percentile 50 / Market Standard. Always cite template sources.`,
   model: gpt4o,
-  tools: { benchmark_clause: benchmarkClauseTool },
 });
+
+// ─── Clause Benchmarking (real agent.generateLegacy() call) ──────────────────
+
+async function benchmarkClause(input: {
+  clauseType: string;
+  clauseIndex: number;
+  clauseText: string;
+  jurisdiction: string;
+  orgId: string;
+  retrievedTemplatesContext: string;
+  industrySector: string;
+}) {
+  const systemPrompt = buildBenchmarkPrompt({
+    clauseType: input.clauseType,
+    orgName: `Org-${input.orgId.slice(0, 8)}`,
+    retrievedTemplates: input.retrievedTemplatesContext || "No comparable templates retrieved.",
+    industrySector: input.industrySector,
+    jurisdiction: input.jurisdiction,
+    clauseText: input.clauseText,
+  });
+
+  const promptHash = crypto.createHash("sha256").update(systemPrompt).digest("hex");
+  const start = Date.now();
+  let result: any = null;
+  let inputTokens = 0, outputTokens = 0;
+
+  try {
+    const response = await benchmarkAgent.generateLegacy<typeof BenchmarkLlmSchema>(
+      [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: `Benchmark clause index ${input.clauseIndex}.` },
+      ],
+      { output: BenchmarkLlmSchema }
+    );
+    inputTokens = response.usage?.promptTokens ?? 0;
+    outputTokens = response.usage?.completionTokens ?? 0;
+    // Cast: same TS overload-narrowing artifact as risk-agent.ts — verified
+    // at runtime the response.object is a genuine object matching the schema.
+    result = response.object as z.infer<typeof BenchmarkLlmSchema>;
+    recordLlmTokens(input.orgId, getChatDeployment(), inputTokens, outputTokens);
+  } catch {
+    // Graceful degradation: return global average
+    result = {
+      percentileRank: 50,
+      marketPosition: "Market Standard",
+      topComparables: [],
+      deltasSummary: "Benchmark analysis unavailable — insufficient template data or service error.",
+    };
+  }
+
+  const topComparables = Array.isArray(result.topComparables)
+    ? result.topComparables.map((item: any) => ({
+        source: item.source ?? "Unknown",
+        similarityScore: item.similarityScore ?? 0,
+        keyDifferences: item.keyDifferences ?? "",
+      }))
+    : [];
+
+  return {
+    percentileRank: result.percentileRank ?? 50,
+    marketPosition: result.marketPosition ?? "Market Standard",
+    topComparables,
+    deltasSummary: result.deltasSummary ?? "",
+    promptHash,
+    inputTokens,
+    outputTokens,
+    latencyMs: Date.now() - start,
+  };
+}
 
 // ─── Executor ─────────────────────────────────────────────────────────────────
 
@@ -232,7 +223,7 @@ export async function executeBenchmarkAgent(input: BenchmarkAgentInput): Promise
       ),
     ].join("\n");
 
-const r = (await benchmarkClauseTool.execute?.({
+    const r = await benchmarkClause({
       clauseType: input.clauseType,
       clauseIndex: input.clauseIndex,
       clauseText: input.clauseText,
@@ -240,7 +231,7 @@ const r = (await benchmarkClauseTool.execute?.({
       orgId: input.orgId,
       retrievedTemplatesContext: templateContext,
       industrySector: "Commercial",
-    }, {} as any)) as any || {};
+    });
 
     span.setAttribute("benchmark.percentile", r.percentileRank);
     span.setAttribute("benchmark.market_position", r.marketPosition);

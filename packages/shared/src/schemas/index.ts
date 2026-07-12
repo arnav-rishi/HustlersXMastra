@@ -48,6 +48,10 @@ export const DocumentAgentInputSchema = z.object({
   orgId: UUIDSchema,
   tenantId: UUIDSchema,
   uploadedBy: UUIDSchema,
+  // The actual extracted/provided contract text. Threaded through so the
+  // Parsing Agent can extract real clauses instead of relying on S3 storage
+  // that isn't implemented in this deployment.
+  rawText: z.string().optional(),
 });
 
 export const DocumentAgentOutputSchema = z.object({
@@ -65,6 +69,7 @@ export const DocumentAgentOutputSchema = z.object({
   s3Key: z.string(),
   isValid: z.boolean(),
   validationErrors: z.array(z.string()).default([]),
+  rawText: z.string().optional(),
 });
 
 export type DocumentAgentInput = z.infer<typeof DocumentAgentInputSchema>;
@@ -88,6 +93,7 @@ export const ParsingAgentInputSchema = z.object({
   orgId: UUIDSchema,
   documentType: z.enum(["digital_pdf", "scanned_pdf", "docx"]),
   s3Key: z.string(),
+  rawText: z.string().optional(),
 });
 
 export const ParsingAgentOutputSchema = z.object({

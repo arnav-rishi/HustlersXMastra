@@ -17,7 +17,9 @@ type DashboardMetrics = {
   totalContracts: number;
   riskCounts: { critical: number; moderate: number; low: number };
   hitl: { pending: number; decided: number };
-  complianceRatePct: number;
+  // Real value from GET /api/v1/analytics/summary — null when there are no
+  // completed contracts yet to compute a rate from.
+  complianceRatePct: number | null;
 };
 
 export default function DashboardPage() {
@@ -69,6 +71,10 @@ export default function DashboardPage() {
     setUploading(true);
     setUploadMessage(null);
     try {
+      // Send the real file bytes via multipart upload so the server extracts
+      // actual text (real PDF/DOCX parsing) instead of relying on the browser's
+      // file.text() — which only produces readable text for plain .txt files
+      // and garbles binary formats like PDF.
       const formData = new FormData();
       formData.append("contract", file);
       formData.append("jurisdiction", "Unknown");
@@ -76,18 +82,19 @@ export default function DashboardPage() {
 
       const response = await fetch(`${API_BASE_URL}/api/v1/contracts/upload`, {
         method: "POST",
-        headers: getApiHeaders(false),
+        headers: getApiHeaders(), // no Content-Type — browser sets the multipart boundary
         body: formData,
       });
 
       if (!response.ok) {
-        throw new Error("Failed to start analysis");
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.message ?? "Failed to start analysis");
       }
 
       setUploadMessage("Contract accepted. 13-agent workflow started.");
       await fetchRecentContracts();
-    } catch {
-      setUploadMessage("Unable to start analysis. Check API and retry.");
+    } catch (err) {
+      setUploadMessage(err instanceof Error ? err.message : "Unable to start analysis. Check API and retry.");
     } finally {
       setUploading(false);
       setFileInputKey((prev) => prev + 1);
@@ -167,7 +174,9 @@ export default function DashboardPage() {
         </div>
         <div className="metric-card success">
           <div className="metric-icon success">✓</div>
-          <div className="metric-value" style={{ color: "var(--risk-low)" }}>{metrics ? `${metrics.complianceRatePct}%` : "—"}</div>
+          <div className="metric-value" style={{ color: "var(--risk-low)" }}>
+            {metrics && metrics.complianceRatePct !== null ? `${metrics.complianceRatePct}%` : "—"}
+          </div>
           <div className="metric-label">Compliance Rate</div>
           <div className="metric-delta">Across all analyzed contracts</div>
         </div>

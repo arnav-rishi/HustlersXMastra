@@ -131,17 +131,54 @@ export async function executeMemoryAgent(input: MemoryAgentInput): Promise<Memor
     let riskPatternId: string | undefined;
     let orgPreferenceId: string | undefined;
 
+    // Drive the agent for real via generateLegacy() rather than calling the
+    // tools directly — this is what produces genuine Mastra AGENT_RUN/
+    // TOOL_CALL spans. toolChoice targets the exact tool by name (not just
+    // "required") because which collection to write is already deterministic
+    // from the human's HITL decision — there's no ambiguity for the model to
+    // resolve, so forcing the specific tool avoids the non-determinism risk
+    // seen with generic "required" tool choice on multi-tool agents.
     if (input.decision === "reject") {
-      const r = (await persistRiskPatternTool.execute?.({ orgId: input.orgId, clauseType: input.clauseType, clauseText: input.clauseText, patternDescription: input.riskDescription, riskLevel: input.riskLevel, rejectionReason: "Human reviewer rejected this clause pattern" }, {} as any)) as any || {};
-      riskPatternId = r.pointId;
-      collectionsUpdated.push(QDRANT_COLLECTIONS.RISK_PATTERNS);
+      const result = await memoryAgent.generateLegacy(
+        `A human reviewer REJECTED this clause. Call persist_risk_pattern to learn it as a toxic pattern.
+        Org ID: ${input.orgId}
+        Clause type: ${input.clauseType}
+        Clause text: ${input.clauseText}
+        Risk level: ${input.riskLevel}
+        Rejection reason: ${input.riskDescription}`,
+        {
+          toolChoice: { type: "tool", toolName: "persist_risk_pattern" },
+          maxSteps: 1,
+        }
+      );
+      const toolResult = (result.steps?.[0]?.toolResults ?? result.toolResults ?? [])
+        .find((t: any) => t.toolName === "persist_risk_pattern")?.result as
+        | { pointId: string }
+        | undefined;
+      riskPatternId = toolResult?.pointId;
+      if (riskPatternId) collectionsUpdated.push(QDRANT_COLLECTIONS.RISK_PATTERNS);
     }
 
     if (input.decision === "approve" || input.decision === "edit") {
       const preferredText = input.editedText ?? input.clauseText;
-      const r = (await persistOrgPreferenceTool.execute?.({ orgId: input.orgId, preferenceType: input.clauseType, preferredLanguage: preferredText, approvedAlternatives: input.editedText ? [input.editedText] : [], createdBy: input.userId }, {} as any)) as any || {};
-      orgPreferenceId = r.pointId;
-      collectionsUpdated.push(QDRANT_COLLECTIONS.ORG_PREFERENCES);
+      const result = await memoryAgent.generateLegacy(
+        `A human reviewer ${input.decision.toUpperCase()}D this clause. Call persist_org_preference to record the preferred language.
+        Org ID: ${input.orgId}
+        Preference type: ${input.clauseType}
+        Preferred language: ${preferredText}
+        Approved alternatives: ${input.editedText ? JSON.stringify([input.editedText]) : "[]"}
+        Created by (user ID): ${input.userId}`,
+        {
+          toolChoice: { type: "tool", toolName: "persist_org_preference" },
+          maxSteps: 1,
+        }
+      );
+      const toolResult = (result.steps?.[0]?.toolResults ?? result.toolResults ?? [])
+        .find((t: any) => t.toolName === "persist_org_preference")?.result as
+        | { pointId: string }
+        | undefined;
+      orgPreferenceId = toolResult?.pointId;
+      if (orgPreferenceId) collectionsUpdated.push(QDRANT_COLLECTIONS.ORG_PREFERENCES);
     }
 
     const writeLatencyMs = Date.now() - start;

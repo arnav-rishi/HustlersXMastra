@@ -51,12 +51,16 @@ const envSchema = z.object({
   S3_BUCKET_NAME: z.string().default("lexguard-contracts"),
   KMS_KEY_ARN: z.string().optional(),
 
-  // Enkrypt
+  // Enkrypt — docs.enkryptai.com Guardrails REST API (POST {url}/guardrails/detect)
   ENKRYPT_API_KEY: z.string().optional(),
   ENKRYPT_API_URL: z
     .string()
     .url()
-    .default("https://api.enkrypt.ai/v1"),
+    .default("https://api.enkryptai.com"),
+  // Measured against the live Guardrails API: 330ms-4s+, with cold-start
+  // variance. A lower timeout aborts real calls and silently falls back to
+  // local heuristics (see enkryptDetect() in packages/enkrypt/src/client.ts).
+  ENKRYPT_TIMEOUT_MS: z.coerce.number().default(8000),
 
   // LexisNexis
   LEXISNEXIS_CLIENT_ID: z.string().optional(),
@@ -73,6 +77,10 @@ const envSchema = z.object({
   // JWT
   JWT_RS256_PRIVATE_KEY_PATH: z.string().default("./keys/private.pem"),
   JWT_RS256_PUBLIC_KEY_PATH: z.string().default("./keys/public.pem"),
+  // Inline PEM contents, for platforms without an easy way to mount a single
+  // secret file (e.g. Azure Container Apps). Takes precedence over
+  // JWT_RS256_PUBLIC_KEY_PATH when set.
+  JWT_RS256_PUBLIC_KEY_PEM: z.string().optional(),
   JWT_ISSUER: z.string().default("https://api.lexguard.ai"),
   JWT_AUDIENCE: z.string().default("lexguard-api"),
   JWT_TOKEN_TTL: z.coerce.number().default(3600),
@@ -80,6 +88,12 @@ const envSchema = z.object({
   // API
   API_PORT: z.coerce.number().default(4000),
   API_HOST: z.string().default("0.0.0.0"),
+  // Comma-separated browser origins allowed to call the API directly (CORS).
+  // Not needed for the primary web app in production — apps/web proxies
+  // /api/v1/* through its own server via next.config.mjs rewrites, so the
+  // browser only ever talks to one origin. Only set this for other direct
+  // callers (Mastra Studio, a mobile app, Postman-based smoke tests, etc.).
+  ALLOWED_ORIGINS: z.string().optional(),
 
   // OpenTelemetry
   OTEL_SERVICE_NAME: z.string().default("lexguard-api"),

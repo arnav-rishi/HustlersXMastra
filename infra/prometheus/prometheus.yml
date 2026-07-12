@@ -3,12 +3,10 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
+  # The API pushes metrics via OTLP to the collector (see
+  # packages/observability/metrics.ts) rather than exposing its own pull-based
+  # /metrics route, so this single job is the only real source of app metrics.
   - job_name: "otel-collector"
     static_configs:
       - targets: ["otel-collector:8888"]
-    metrics_path: /metrics
-
-  - job_name: "lexguard-api"
-    static_configs:
-      - targets: ["host.docker.internal:4000"]
     metrics_path: /metrics

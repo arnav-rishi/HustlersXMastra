@@ -5,20 +5,25 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    "./contract-analysis": { "types": "./dist/contract-analysis.d.ts", "development": "./src/contract-analysis.ts", "default": "./dist/contract-analysis.js" }
+    "./contract-analysis": {
+      "types": "./dist/contract-analysis.d.ts",
+      "development": "./src/contract-analysis.ts",
+      "default": "./dist/contract-analysis.js"
+    }
   },
   "scripts": {
     "type-check": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@mastra/core": "^1.50.0",
-    "@prisma/client": "^5.15.0",
-    "uuid": "^10.0.0",
-    "@lexguard/shared": "workspace:*",
     "@lexguard/agents": "workspace:*",
     "@lexguard/observability": "workspace:*",
-    "zod": "^3.23.0"
+    "@lexguard/shared": "workspace:*",
+    "@mastra/core": "^1.50.0",
+    "@mastra/observability": "1.16.0",
+    "@prisma/client": "^5.15.0",
+    "uuid": "^10.0.0",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/uuid": "^10.0.0",

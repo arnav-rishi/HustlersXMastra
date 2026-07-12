@@ -21,7 +21,11 @@ processors:
 
 exporters:
   otlp/jaeger:
-    endpoint: jaeger:4317
+    # ${env:VAR} is the collector's native env-var substitution syntax
+    # (resolved at container startup, not build time) — lets the same config
+    # file work unmodified in both docker-compose (JAEGER_ENDPOINT=jaeger:4317)
+    # and Azure Container Apps (set to Jaeger's internal FQDN).
+    endpoint: ${env:JAEGER_ENDPOINT}
     tls:
       insecure: true
   prometheus:

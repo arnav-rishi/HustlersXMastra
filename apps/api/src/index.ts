@@ -66,10 +66,13 @@ app.use(
 );
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
-const allowedOrigins =
-  env.NODE_ENV === "production"
-    ? ["https://app.lexguard.ai", "https://dashboard.lexguard.ai"]
-    : ["http://localhost:3000", "http://localhost:3001"];
+// apps/web talks to this API via server-side Next.js rewrites (see
+// apps/web/next.config.mjs), so the browser never crosses origins for the
+// primary app and CORS mainly guards direct callers (Mastra Studio, scripts).
+// ALLOWED_ORIGINS is a comma-separated list; falls back to local dev origins.
+const allowedOrigins = env.ALLOWED_ORIGINS
+  ? env.ALLOWED_ORIGINS.split(",").map((o) => o.trim())
+  : ["http://localhost:3000", "http://localhost:3001"];
 
 app.use(
   cors({
