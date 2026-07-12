@@ -27,6 +27,10 @@
 import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
+import fs from "fs";
+import path from "path";
+import pdfParse from "pdf-parse";
+import mammoth from "mammoth";
 import { gpt4o } from "./models";
 import {
   type ParsingAgentInput,
@@ -36,6 +40,56 @@ import {
 } from "@lexguard/shared/schemas";
 import { withSpan, OTEL_SPAN_NAMES } from "@lexguard/observability/tracer";
 import { OCR_MIN_CONFIDENCE, CLAUSE_TYPES } from "@lexguard/shared/constants";
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Splits raw extracted contract text into clause-level chunks.
+ * Real contracts are almost always numbered ("1. Indemnification", "Section 3:"),
+ * so we primarily split on numbered/lettered section headers at the start of a
+ * line. If no such headers are found (e.g. an unstructured document), we fall
+ * back to blank-line paragraph breaks, and finally to fixed-size chunking so we
+ * never return the whole document as a single unusable "clause".
+ */
+function splitIntoClauses(rawText: string): string[] {
+  const lines = rawText.split(/\r?\n/);
+  const headerRe =
+    /^\s*(?:\d{1,2}(?:\.\d+)?[.)]\s+[A-Z][A-Za-z0-9 ,/&'()-]{2,80}|SECTION\s+\d+\b.*|ARTICLE\s+[IVXLC0-9]+\b.*)\s*$/;
+
+  const sections: string[][] = [];
+  let current: string[] = [];
+  for (const line of lines) {
+    if (headerRe.test(line) && current.length > 0) {
+      sections.push(current);
+      current = [line];
+    } else {
+      current.push(line);
+    }
+  }
+  if (current.length > 0) sections.push(current);
+
+  let clauses = sections
+    .map((s) => s.join("\n").trim())
+    .filter((c) => c.length > 40);
+
+  if (clauses.length < 2) {
+    clauses = rawText
+      .split(/\n\s*\n+/)
+      .map((p) => p.trim())
+      .filter((p) => p.length > 40);
+  }
+
+  if (clauses.length < 2 && rawText.trim().length > 0) {
+    const chunkSize = 800;
+    clauses = [];
+    for (let i = 0; i < rawText.length; i += chunkSize) {
+      const chunk = rawText.slice(i, i + chunkSize).trim();
+      if (chunk.length > 0) clauses.push(chunk);
+    }
+  }
+
+  return clauses.slice(0, 40); // sane cap per contract
+}
 
 // ─── Tools ───────────────────────────────────────────────────────────────────
 
@@ -59,74 +113,65 @@ const extractDigitalPdfTool = createTool({
     engine: z.literal("unstructured"),
   }),
   execute: async (input, context) => {
-    const { s3Key, contractId } = input;
+    const { s3Key } = input;
 
-    // In production:
-    // const client = new UnstructuredClient({ serverURL: process.env.UNSTRUCTURED_URL });
-    // const elements = await client.general.partition({ files: ... });
+    // In production, this would call Unstructured.io:
+    //   const client = new UnstructuredClient({ serverURL: process.env.UNSTRUCTURED_URL });
+    //   const elements = await client.general.partition({ files: ... });
     //
-    // For now, return a mock structured response for development scaffolding.
-    // The mock simulates a 5-clause contract (indemnification, limitation_of_liability, etc.)
+    // Locally, s3Key is a real filesystem path (see document-agent.ts / the
+    // upload route's LOCAL_UPLOAD_DIR shim), so we read and parse the actual
+    // uploaded file here — PDF via pdf-parse, DOCX via mammoth — and split it
+    // into clause-level chunks. clauseType is left null; the Classification
+    // Agent (#4) is responsible for assigning real clause types downstream.
+    try {
+      const buffer = fs.readFileSync(s3Key);
+      const ext = path.extname(s3Key).toLowerCase();
 
-    const mockClauses: ExtractedClause[] = [
-      {
-        clauseIndex: 0,
-        clauseType: "indemnification",
-        clauseText:
-          "Party A shall indemnify, defend, and hold harmless Party B from and against any and all claims, damages, losses, costs, and expenses (including attorneys' fees) arising out of or relating to Party A's performance under this Agreement, without limitation.",
-        pageNumber: 3,
-        boundingBox: { x: 72, y: 320, w: 540, h: 90 },
-        ocrConfidence: 1.0,
-        characterCount: 285,
-      },
-      {
-        clauseIndex: 1,
-        clauseType: "limitation_of_liability",
-        clauseText:
-          "IN NO EVENT SHALL EITHER PARTY BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES, HOWEVER CAUSED.",
-        pageNumber: 4,
-        boundingBox: { x: 72, y: 140, w: 540, h: 60 },
-        ocrConfidence: 1.0,
-        characterCount: 163,
-      },
-      {
-        clauseIndex: 2,
-        clauseType: "auto_renewal",
-        clauseText:
-          "This Agreement shall automatically renew for successive one-year terms unless either party provides written notice of non-renewal.",
-        pageNumber: 1,
-        boundingBox: { x: 72, y: 580, w: 540, h: 50 },
-        ocrConfidence: 1.0,
-        characterCount: 143,
-      },
-      {
-        clauseIndex: 3,
-        clauseType: "confidentiality",
-        clauseText:
-          "Each party agrees to hold the other party's Confidential Information in strict confidence and to use such Confidential Information only for purposes of this Agreement.",
-        pageNumber: 5,
-        boundingBox: { x: 72, y: 240, w: 540, h: 70 },
-        ocrConfidence: 1.0,
-        characterCount: 192,
-      },
-      {
-        clauseIndex: 4,
-        clauseType: "data_processing",
-        clauseText:
-          "Party A may collect, process, and store personal data of Party B's customers as necessary to provide the Services described herein.",
-        pageNumber: 6,
-        boundingBox: { x: 72, y: 420, w: 540, h: 55 },
-        ocrConfidence: 1.0,
-        characterCount: 154,
-      },
-    ];
+      let rawText: string;
+      let pageCount: number;
 
-    return {
-      clauses: mockClauses,
-      pageCount: 8,
-      ocrConfidence: 1.0,
-      engine: "unstructured" as const,
-    };
+      if (ext === ".docx" || ext === ".doc") {
+        const result = await mammoth.extractRawText({ buffer });
+        rawText = result.value;
+        pageCount = Math.max(1, Math.ceil(rawText.split(/\s+/).length / 500));
+      } else {
+        const parsed = await pdfParse(buffer);
+        rawText = parsed.text;
+        pageCount = Math.max(1, parsed.numpages || 1);
+      }
+
+      const chunks = splitIntoClauses(rawText);
+
+      const clauses: ExtractedClause[] = chunks.map((text, i) => ({
+        clauseIndex: i,
+        clauseType: null,
+        clauseText: text,
+        pageNumber: Math.min(pageCount, Math.floor(i / 4) + 1),
+        ocrConfidence: 1.0,
+        characterCount: text.length,
+      }));
+
+      return {
+        clauses,
+        pageCount,
+        ocrConfidence: 1.0,
+        engine: "unstructured" as const,
+      };
+    } catch (err) {
+      console.error(
+        `[LexGuard][ParsingAgent] Failed to read/extract file at "${s3Key}":`,
+        err
+      );
+      // Fail safe rather than crashing the workflow. ocrConfidence: 0 causes
+      // flaggedForHitl to be set downstream so a human reviews the failure.
+      return {
+        clauses: [],
+        pageCount: 1,
+        ocrConfidence: 0,
+        engine: "unstructured" as const,
+      };
+    }
   },
 });
 
