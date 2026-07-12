@@ -102,13 +102,17 @@ API_INTERNAL_FQDN="${NAME_PREFIX}-api.internal.${CONTAINER_APPS_ENV_DEFAULT_DOMA
 OTEL_COLLECTOR_INTERNAL_FQDN="${NAME_PREFIX}-otel-collector.internal.${CONTAINER_APPS_ENV_DEFAULT_DOMAIN}"
 PROMETHEUS_INTERNAL_FQDN="${NAME_PREFIX}-prometheus.internal.${CONTAINER_APPS_ENV_DEFAULT_DOMAIN}"
 # External-ingress apps use <app-name>.<default-domain> (no ".internal." segment).
-# Grafana doesn't exist yet at this point (it's deployed in Phase 3), but its
-# FQDN is deterministic, so the web image can bake in a working link now.
+# None of these exist yet at this point (all deployed in Phase 3), but their
+# FQDNs are deterministic, so images can bake in working values now.
 GRAFANA_EXTERNAL_FQDN="${NAME_PREFIX}-grafana.${CONTAINER_APPS_ENV_DEFAULT_DOMAIN}"
+# api is external (browser calls it directly with CORS) — see apps.bicep's
+# header comment for why this isn't proxied through web anymore.
+API_EXTERNAL_FQDN="${NAME_PREFIX}-api.${CONTAINER_APPS_ENV_DEFAULT_DOMAIN}"
+WEB_EXTERNAL_FQDN="${NAME_PREFIX}-web.${CONTAINER_APPS_ENV_DEFAULT_DOMAIN}"
 
 echo "ACR: $ACR_LOGIN_SERVER"
 echo "Qdrant internal URL: $QDRANT_INTERNAL_URL"
-echo "api will be reachable internally at: http://$API_INTERNAL_FQDN"
+echo "api will be reachable at: https://$API_EXTERNAL_FQDN"
 echo "Jaeger UI: https://$JAEGER_EXTERNAL_FQDN"
 
 echo "== Phase 2a: build+push api image (server-side, via ACR Tasks) =="
@@ -123,7 +127,7 @@ az acr build \
   --registry "$ACR_NAME" \
   --image "lexguard-web:$IMAGE_TAG" \
   --file "$REPO_ROOT/apps/web/Dockerfile" \
-  --build-arg NEXT_PUBLIC_API_BASE_URL= \
+  --build-arg NEXT_PUBLIC_API_BASE_URL="https://$API_EXTERNAL_FQDN" \
   --build-arg API_INTERNAL_URL="http://$API_INTERNAL_FQDN" \
   --build-arg NEXT_PUBLIC_GRAFANA_URL="https://$GRAFANA_EXTERNAL_FQDN" \
   --build-arg NEXT_PUBLIC_JAEGER_URL="https://$JAEGER_EXTERNAL_FQDN" \
@@ -170,6 +174,7 @@ APPS_OUT=$(az deployment group create \
                grafanaImageTag="$IMAGE_TAG" \
                jaegerOtlpEndpoint="$JAEGER_OTLP_ENDPOINT" \
                grafanaAdminPassword="$GRAFANA_ADMIN_PASSWORD" \
+               allowedOrigins="https://$WEB_EXTERNAL_FQDN" \
                databaseUrl="$DATABASE_URL" \
                qdrantInternalUrl="$QDRANT_INTERNAL_URL" \
                qdrantApiKey="$QDRANT_API_KEY" \
@@ -192,15 +197,14 @@ GRAFANA_FQDN=$(echo "$APPS_OUT" | jq -r '.grafanaFqdn.value')
 echo ""
 echo "== Done =="
 echo "Web:          https://$WEB_FQDN"
-echo "API (internal, not publicly reachable): $API_FQDN"
+echo "API:          https://$API_FQDN  (external — browser calls this directly, CORS-restricted to the web origin)"
 echo "Grafana:      https://$GRAFANA_FQDN  (user: admin)"
 echo "Jaeger:       https://$JAEGER_EXTERNAL_FQDN"
 echo ""
-if [ "$API_FQDN" != "$API_INTERNAL_FQDN" ]; then
-  echo "NOTE: the web image was built assuming API_INTERNAL_URL=http://$API_INTERNAL_FQDN"
+if [ "$API_FQDN" != "$API_EXTERNAL_FQDN" ]; then
+  echo "NOTE: the web image was built assuming NEXT_PUBLIC_API_BASE_URL=https://$API_EXTERNAL_FQDN"
   echo "      but the actual api FQDN is $API_FQDN. Re-run this script (or just"
-  echo "      the Phase 2b + Phase 3 steps with API_INTERNAL_FQDN=$API_FQDN exported)"
-  echo "      to rebuild web with the correct address baked in."
+  echo "      the Phase 2b + Phase 3 steps) to rebuild web with the correct address baked in."
 fi
 echo ""
 echo "Next: run 'pnpm --filter @lexguard/api db:migrate:deploy' and 'pnpm qdrant:init'"

@@ -4,13 +4,16 @@
 // and web images into the ACR it creates, then deploy this file with the
 // resulting image tags. See ../../DEPLOYMENT.md.
 //
-// api gets INTERNAL-ONLY ingress — it is never reached directly by a browser.
-// web is the only externally-facing app; its Next.js server proxies
-// /api/v1/* to api's internal FQDN (see apps/web/next.config.mjs), so the
-// browser only ever talks to one origin and CORS is a non-issue.
-//
-// Not deployed/tested against a live subscription — run `az bicep build`
-// against this file and `az deployment group what-if` before applying.
+// api is EXTERNALLY reachable, called directly by the browser with CORS
+// (ALLOWED_ORIGINS below), rather than proxied through web's Next.js server.
+// Originally api was internal-only with web proxying /api/v1/* server-side
+// (zero-CORS design) — reverted after confirming live that Container Apps'
+// internal HTTP ingress resets the connection on proxied POST requests with
+// a body (multipart file uploads specifically; plain GETs worked fine).
+// Internal ingress on this environment has now shown two distinct
+// reliability problems (this, and TCP-transport ingress for Redis — see
+// base.bicep), so external+CORS was chosen as the reliable, standard path
+// rather than continuing to debug the internal proxy layer.
 
 @description('Same prefix used in base.bicep.')
 @minLength(3)
@@ -36,6 +39,9 @@ param webImageTag string
 
 @secure()
 param databaseUrl string
+
+@description('Comma-separated browser origins allowed to call api (CORS) — web app external FQDN.')
+param allowedOrigins string
 
 // Redis runs as a sidecar container inside apiApp below (localhost:6379) —
 // no param needed. See base.bicep for why: TCP-transport internal ingress
@@ -99,15 +105,13 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
     managedEnvironmentId: containerAppsEnvId
     configuration: {
       ingress: {
-        external: false
+        // External: browser calls this directly with CORS (ALLOWED_ORIGINS
+        // env var below) instead of going through web's proxy — see the
+        // file header comment for why. Already behind JWT auth on every
+        // protected route, same security model as any public API.
+        external: true
         targetPort: 4000
         transport: 'http'
-        // CONFIRMED LIVE BUG without this: Container Apps ingress defaults
-        // to forcing HTTP->HTTPS redirects even on internal-only ingress.
-        // web's Next.js server reaches this over plain http://<internal-fqdn>
-        // (baked in as API_INTERNAL_URL) — that 301 was surfacing to the
-        // browser as CORS errors on every API call. See DEPLOYMENT.md.
-        allowInsecure: true
       }
       registries: [
         { server: acrLoginServer, identity: acrPullIdentityId }
@@ -148,6 +152,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'JWT_AUDIENCE', value: jwtAudience }
             { name: 'API_PORT', value: '4000' }
             { name: 'API_HOST', value: '0.0.0.0' }
+            { name: 'ALLOWED_ORIGINS', value: allowedOrigins }
             { name: 'ENKRYPT_ENABLED', value: enkryptEnabled }
             { name: 'LEXISNEXIS_ENABLED', value: lexisNexisEnabled }
             { name: 'HITL_ENABLED', value: hitlEnabled }
@@ -247,8 +252,10 @@ resource otelCollectorApp 'Microsoft.App/containerApps@2024-03-01' = {
         external: false
         targetPort: 4318
         transport: 'http'
-        // See allowInsecure comment on apiApp above — same fix, api reaches
-        // this over plain http://<internal-fqdn>.
+        // Container Apps ingress defaults to forcing HTTP->HTTPS redirects
+        // even on internal-only ingress — api reaches this over plain
+        // http://<internal-fqdn> (OTEL_EXPORTER_OTLP_ENDPOINT above), which
+        // would otherwise 301 and break every trace/metric export.
         allowInsecure: true
         // Prometheus needs to reach the collector's own metrics-exporter
         // port (8888, see infra/otel/collector-config.yml's `prometheus`
@@ -294,8 +301,10 @@ resource prometheusApp 'Microsoft.App/containerApps@2024-03-01' = {
         external: false
         targetPort: 9090
         transport: 'http'
-        // See allowInsecure comment on apiApp above — same fix, grafana
-        // reaches this over plain http://<internal-fqdn>.
+        // Container Apps ingress defaults to forcing HTTP->HTTPS redirects
+        // even on internal-only ingress — grafana reaches this over plain
+        // http://<internal-fqdn> (its datasource config, baked in at image
+        // build time), which would otherwise 301 and break every query.
         allowInsecure: true
       }
       registries: [

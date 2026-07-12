@@ -7,18 +7,28 @@ needed.
 
 ## Why this shape
 
-- **One public origin.** `apps/web`'s Next.js server proxies `/api/v1/*` to
-  the api container server-side (`apps/web/next.config.mjs`, via
-  `API_INTERNAL_URL`). The browser only ever talks to the web app's domain —
-  it never makes a cross-origin request to the api, so there's no CORS to
-  configure or keep in sync across two independently-managed domains.
-- **`api` has internal-only ingress.** It's not reachable from the public
-  internet at all, only from `web` inside the same Container Apps
-  Environment. Smaller attack surface than exposing it directly.
+- **`api` is externally reachable, called directly by the browser with CORS**
+  (`ALLOWED_ORIGINS` locked to the web app's origin). This was originally a
+  zero-CORS design — `web`'s Next.js server proxying `/api/v1/*` to `api`
+  server-side over internal-only ingress — but that was reverted after
+  confirming live that this Container Apps Environment's internal HTTP
+  ingress resets the connection on proxied `POST` requests with a body
+  (multipart file uploads specifically broke; plain `GET`s worked fine).
+  Internal ingress also failed a second, unrelated way for Redis (TCP
+  transport, see below) — two distinct reliability problems were enough to
+  move off internal ingress for anything load-bearing rather than keep
+  debugging the platform's internal proxy layer.
 - **Same region as Azure OpenAI.** Deploy Container Apps in the same region
   as your Azure OpenAI resource to cut latency on every agent call.
-- **Managed Postgres + Redis**, replacing the local `docker-compose.yml`
-  containers — same engines (Postgres 16, Redis), just hosted.
+- **Managed Postgres**, replacing the local `docker-compose.yml` container —
+  same engine (Postgres 16), just hosted. **Redis runs as a sidecar
+  container inside `api`** (`localhost:6379`, same revision/network
+  namespace) rather than its own Container App — its earlier TCP-transport
+  internal ingress consistently timed out on every connection from `api`,
+  regardless of ingress config (tried both default and explicit
+  `exposedPort`). Classic "Azure Cache for Redis" is also retired for new
+  deployments in this subscription, and its replacement ("Azure Managed
+  Redis") has an unverified Bicep schema — the sidecar sidesteps both issues.
 
 ## What's been prepared (and verified locally)
 
