@@ -38,6 +38,11 @@
 #   AZURE_OPENAI_DEPLOYMENT_MINI
 #   AZURE_OPENAI_API_VERSION
 #   ENKRYPT_ENABLED / LEXISNEXIS_ENABLED / HITL_ENABLED  default false/false/true
+#   DEV_BYPASS_AUTH           default false. Set to "true" ONLY for a throwaway
+#                             demo deployment — it skips all JWT verification
+#                             (see apps/api/src/middleware/auth.ts) and grants
+#                             every request a fake admin user. Never set this
+#                             for anything handling real customer data.
 #   SKIP_BUILD=true           skip all 5 `az acr build` calls (Phase 2) and
 #                             redeploy Bicep only, reusing an existing image
 #                             tag (REUSE_IMAGE_TAG, required if SKIP_BUILD=true).
@@ -80,6 +85,7 @@ AZURE_OPENAI_API_VERSION="${AZURE_OPENAI_API_VERSION:-2024-10-01-preview}"
 ENKRYPT_ENABLED="${ENKRYPT_ENABLED:-false}"
 LEXISNEXIS_ENABLED="${LEXISNEXIS_ENABLED:-false}"
 HITL_ENABLED="${HITL_ENABLED:-true}"
+DEV_BYPASS_AUTH="${DEV_BYPASS_AUTH:-false}"
 SKIP_BUILD="${SKIP_BUILD:-false}"
 if [ "$SKIP_BUILD" = "true" ]; then
   : "${REUSE_IMAGE_TAG:?SKIP_BUILD=true requires REUSE_IMAGE_TAG}"
@@ -163,7 +169,7 @@ else
     --build-arg NEXT_PUBLIC_GRAFANA_URL="https://$GRAFANA_EXTERNAL_FQDN" \
     --build-arg NEXT_PUBLIC_JAEGER_URL="https://$JAEGER_EXTERNAL_FQDN" \
     --build-arg NEXT_PUBLIC_DEV_TENANT_ID="00000000-0000-0000-0000-000000000001" \
-    --build-arg NEXT_PUBLIC_DEV_AUTH_TOKEN="dev-bypass-token" \
+    --build-arg NEXT_PUBLIC_DEV_AUTH_TOKEN="$([ "$DEV_BYPASS_AUTH" = "true" ] && echo "dev-bypass-token" || echo "")" \
     "$REPO_ROOT"
 
   echo "== Phase 2c: build+push otel-collector image =="
@@ -222,6 +228,7 @@ APPS_OUT=$(az deployment group create \
                enkryptEnabled="$ENKRYPT_ENABLED" \
                lexisNexisEnabled="$LEXISNEXIS_ENABLED" \
                hitlEnabled="$HITL_ENABLED" \
+               devBypassAuth="$DEV_BYPASS_AUTH" \
   --query properties.outputs -o json)
 
 WEB_FQDN=$(echo "$APPS_OUT" | jq -r '.webFqdn.value')

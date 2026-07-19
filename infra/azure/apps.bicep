@@ -68,8 +68,8 @@ param jwtPublicKeyPem string
 param jwtIssuer string = 'https://api.lexguard.ai'
 param jwtAudience string = 'lexguard-api'
 
-@description('Bypasses real JWT verification (apps/api/src/middleware/auth.ts) and injects a fake authenticated admin user on every request. Purpose-built dev/demo escape hatch already in the codebase — appropriate for demonstrating the agent pipeline, NOT for anything handling real customer data/auth. Set to "false" once real signed JWTs are wired up for this environment.')
-param devBypassAuth string = 'true'
+@description('Bypasses real JWT verification (apps/api/src/middleware/auth.ts) and injects a fake authenticated admin user on every request. Purpose-built dev/demo escape hatch already in the codebase — appropriate for demonstrating the agent pipeline, NOT for anything handling real customer data/auth. Defaults to "false"; pass -devBypassAuth=true explicitly for a demo deployment.')
+param devBypassAuth string = 'false'
 
 param enkryptEnabled string = 'false'
 param lexisNexisEnabled string = 'false'
